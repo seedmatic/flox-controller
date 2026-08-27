@@ -1,0 +1,9 @@
+/result
+/result-*
+result
+result-*
+.direnv/
+bin/
+*.test
+__debug_bin*
+cover.out
