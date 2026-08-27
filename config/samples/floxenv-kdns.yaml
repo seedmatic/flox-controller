@@ -1,0 +1,21 @@
+# A workload env (consumption: overlay) — the NRI plugin overlays it into a pod at
+# container-create, on top of whatever carrier the pod chose. Contrast with the carrier
+# (consumption: image). See docs/design.md § Consumption modes.
+apiVersion: flox.seedmatic.io/v1alpha1
+kind: FloxEnv
+metadata:
+  name: kdns
+  namespace: networking
+spec:
+  consumption: overlay
+  folder: networking
+  manifest:
+    install:
+      kdns: { flake: "github:seedmatic/...#kdns" }
+    include:
+      # Compose a shared base env, flox-native by PATH → its host folder. It resolves
+      # because that env materialises at its own `folder` (flox-system/base) on the node.
+      environments:
+        - dir: ../../flox-system/base
+  update:
+    mode: Manual
