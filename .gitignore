@@ -7,3 +7,7 @@ bin/
 *.test
 __debug_bin*
 cover.out
+
+# Per-checkout Claude config (not tracked); memory under .claude/memory IS tracked.
+.claude/settings.local.json
+.claude/projects/
