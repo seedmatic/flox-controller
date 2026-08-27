@@ -20,40 +20,61 @@ container-create; this controller *provisions* what the plugin injects. See
 > **Not air-gapped (for now).** Nodes have network; the controller substitutes /
 > containerizes freely from the builder + caches. We do **not** build offline logic.
 > Air-gap may return as a future constraint — the design must not *preclude* it, but we
-> don't build *for* it now. Distinct from that: we **do not use FloxHub** — envs are
-> pinned by a committed `manifest.lock` carried in the CR (determinism + ownership).
+> don't build *for* it now. Distinct from that: we **do not use FloxHub** — an env's
+> lock is resolved from its manifest and held in `status` (determinism + ownership).
 
 ## The `FloxEnv` resource
+
+Designed **maintenance-first**: `spec` is the maintainer-authored INTENT (the flox
+manifest as YAML, the host folder, the update policy); `status` is GENERATED and never
+hand-edited (the lock, what resolved, per-node realisation). Maintaining an env is a
+loop: **introspect `status`, adjust `spec`**.
 
 ```yaml
 apiVersion: flox.seedmatic.io/v1alpha1
 kind: FloxEnv
 metadata: { name: kdns, namespace: networking }
 spec:
-  consumption: overlay          # overlay | image   (default: overlay)
-  manifest: |                   # the flox manifest.toml (env definition)
-    ...
-  lock: |                       # the committed flox manifest.lock (pins closures)
-    ...
-  folder: networking            # relative host-layout path; default = metadata.namespace
-  includes:                     # compose other FloxEnvs via flox [include]
-    - { namespace: flox-system, name: base }
+  consumption: overlay              # overlay | image   (default: overlay)
+  manifest:                         # the flox manifest AS YAML — a transposition of
+    install:                        #   manifest.toml (SAME shape, not re-modelled)
+      kdns:    { flake: "github:seedmatic/...#kdns" }
+      kubectl: { pkg-path: kubectl }
+    include:                        # flox-native, by PATH → other envs' host folders
+      environments:
+        - dir: ../../flox-system/base
+    vars: { FLOX_FOO: bar }
+    # hook / profile / options / services — whatever flox supports
+  update: { mode: Manual }          # lock-refresh policy (Manual | Track)
+  folder: networking                # host-layout path; default = metadata.namespace
 status:
+  lock: "..."                       # GENERATED — the resolved manifest.lock (the pin)
+  resolved: { kdns: 0.2.15 }        # GENERATED — what each package resolved to
   realized:
-    - { node: node-a, ready: true, storePath: /nix/store/...-env, observedGeneration: 3 }
+    - { node: node-a, ready: true, storePath: /nix/store/...-env }
 ```
 
-- **`spec` carries the committed intent verbatim** — `manifest` + `lock` inline. The
-  controller realises from the lock and **never re-locks**. The CR *is* the k8s-visible
-  env (`kubectl get/describe floxenv`).
-- **`folder`** is the relative host-layout path the env materialises in
-  (`<envroot>/<folder>/<name>/`), **dissociated from the k8s namespace** so flox
-  `[include]` composition is layout-controlled. Defaults to `metadata.namespace`.
-- **`includes`** reference other `FloxEnv` CRs; the controller resolves each target's
-  `folder` and renders the relative `[include]` dir in the materialised manifest — the
-  author declares logical `{namespace,name}`, the controller owns the paths.
-- **`status.realized`** reports per-node realisation (the plugin/consumers read the
-  resolved `storePath`).
+- **`spec` = intent.** `manifest` — the **flox manifest as YAML**, a faithful
+  transposition of `manifest.toml` (same shape, NOT re-modelled: `install`, `include`,
+  `vars`, `hook`, …); the controller serialises it back to `manifest.toml`. Composition
+  stays **flox-native**: `include` uses PATHS (`../../<folder>/<name>`) that resolve to
+  other envs' host folders — the CR does not model includes (no CR↔manifest conflict).
+  `update` (lock-refresh policy); `folder` (the HOST-materialisation path — dissociated
+  from the k8s namespace, MAY be structured like `mesh/base`, defaults to
+  `metadata.namespace`; it is what other envs' `include` paths resolve against).
+- **`status` = generated, never hand-edited.** `lock` (the resolved `manifest.lock`, the
+  deterministic pin), `resolved` (what each package resolved to — inspection), `realized`
+  (per-node; the plugin/consumers read the resolved `storePath`).
+- **The lock lives in `status`** so the maintenance loop is *introspect (`status`) →
+  adjust (`spec`)* — you never hand-edit a lock; you edit the manifest and the lock
+  refreshes. The node-agent **never locks** (no per-node drift); it realises
+  `status.lock` verbatim.
+
+> **Open axis — who produces `status.lock`.** Locking resolves the manifest against a
+> catalog. Options: the operator **env-bumper** (catalog access stays at the operator,
+> no in-cluster FloxHub) vs an in-cluster **lock-controller** reacting to `spec` changes
+> per `spec.update` (more automatic, but needs in-cluster catalog access → FloxHub or a
+> self-hosted catalog). We avoid FloxHub → leans operator-bumper or a local catalog. To settle.
 
 ### Consumption modes
 
@@ -80,9 +101,9 @@ Reconcile-to-desired, one pass:
 ```
 desired = FloxEnv CRs (watched)
 for env in desired:
-  materialise env dir at <envroot>/<env.folder|namespace>/<env.name>/ (manifest + lock)
-  render [include] dirs from env.includes (resolve each target's folder → ../../<folder>/<name>)
-  ask the node nix daemon to realise the lock's closures onto the host /nix/store
+  serialise spec.manifest (YAML → manifest.toml) at <envroot>/<folder>/<name>/
+    (its flox [include] paths resolve to sibling envs, materialised likewise)
+  ask the node nix daemon to realise status.lock's closures onto the host /nix/store
   if consumption == overlay:  write the GC-root(s)
   if consumption == image:    flox containerize + import into containerd
   patch status.realized[node]
@@ -145,7 +166,7 @@ The `FloxEnv` CR is the shared contract both read.
 ```mermaid
 flowchart TB
   subgraph k8s["Kubernetes"]
-    cr["FloxEnv CR (flox.seedmatic.io)<br/>spec: manifest+lock+folder+includes+consumption<br/>status: realized@node"]
+    cr["FloxEnv CR (flox.seedmatic.io)<br/>spec: manifest(YAML)+folder+consumption+update<br/>status: lock+resolved+realized"]
     ctl["flox-controller<br/>node-agent DaemonSet (this repo)"]
     pod["pod: image=carrier + annotation env<br/>(NRI plugin overlays)"]
     cr -->|watch| ctl
