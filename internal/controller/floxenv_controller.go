@@ -17,6 +17,10 @@ import (
 	"github.com/seedmatic/flox-controller/internal/provisioner"
 )
 
+// floxSchemaVersion is the manifest.toml schema-version the controller stamps onto a serialised
+// spec.manifest when the maintainer didn't set it (they shouldn't — it's flox plumbing).
+const floxSchemaVersion = "1.14.0"
+
 // FloxEnvReconciler realises a FloxEnv onto the LOCAL node's nix store.
 //
 // Node-agent model: one instance per node (run as a DaemonSet); each instance
@@ -115,6 +119,11 @@ func manifestToTOML(raw *runtime.RawExtension) ([]byte, error) {
 	var m map[string]any
 	if err := json.Unmarshal(raw.Raw, &m); err != nil {
 		return nil, fmt.Errorf("unmarshal spec.manifest: %w", err)
+	}
+	// schema-version is flox plumbing, not manifest content the maintainer authors — inject it
+	// so spec.manifest stays clean. TODO(on-node): track the node's flox rather than pinning.
+	if _, ok := m["schema-version"]; !ok {
+		m["schema-version"] = floxSchemaVersion
 	}
 	out, err := toml.Marshal(m)
 	if err != nil {
