@@ -195,6 +195,12 @@ in it; they ride the `/nix` overlay the NRI plugin mounts.
   as a foundation artifact (this repo's `flox-controller-image`); the controller needs no
   carrier to start, and it produces the carriers for workload pods. Ordering to the first
   workload pod is handled by the plugin being fail-closed + Kubernetes retry.
+* *The base carrier belongs to the controller* — it is *embedded in the binary*
+  (`internal/carrier/base-carrier.yaml`) and *self-provisioned on startup*
+  (`carrier.EnsureBase`: create-if-absent, a DEFAULT that never clobbers an operator
+  override). So the base carrier is NOT something the consumer synthesises — the baked
+  controller brings it. The consumer adds only workload `FloxEnv` s (and any specialised
+  carriers) as its own CRs. This supersedes any baked carrier image on the consumer side.
 
 [[the-carrier-contract-invariant]]
 === The carrier-contract invariant

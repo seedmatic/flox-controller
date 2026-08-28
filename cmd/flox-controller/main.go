@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -10,8 +11,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
+	"github.com/seedmatic/flox-controller/internal/carrier"
 	"github.com/seedmatic/flox-controller/internal/controller"
 	"github.com/seedmatic/flox-controller/internal/provisioner"
 )
@@ -27,13 +30,21 @@ func init() {
 }
 
 func main() {
-	var probeAddr, envRoot, gcrootBase, ctrBin string
+	var probeAddr, envRoot, gcrootBase, ctrBin, baseCarrierNamespace string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
 	flag.StringVar(&envRoot, "env-root", "/var/lib/flox-controller/envs",
 		"host dir where .flox env sources materialise (<env-root>/<folder>/<name>)")
 	flag.StringVar(&gcrootBase, "gcroot-base", "/nix/var/nix/gcroots/flox-runtime/env",
 		"flox-runtime GC-root dir the NRI plugin reads")
 	flag.StringVar(&ctrBin, "ctr-bin", "ctr", "containerd CLI used to import carrier images")
+	// The controller owns its base carrier: it self-provisions it (see internal/carrier).
+	// Defaults to the controller's own namespace (always exists), else flox-system.
+	defaultCarrierNs := os.Getenv("POD_NAMESPACE")
+	if defaultCarrierNs == "" {
+		defaultCarrierNs = "flox-system"
+	}
+	flag.StringVar(&baseCarrierNamespace, "base-carrier-namespace", defaultCarrierNs,
+		"namespace for the controller's embedded base carrier FloxEnv")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -64,6 +75,19 @@ func main() {
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up controller", "controller", "FloxEnv")
+		os.Exit(1)
+	}
+
+	// Self-provision the controller's own base carrier once the cache is up. Best-effort:
+	// a failure (e.g. namespace not yet present) logs and is retried on restart, never
+	// crash-loops the manager.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if err := carrier.EnsureBase(ctx, mgr.GetClient(), baseCarrierNamespace); err != nil {
+			setupLog.Error(err, "base carrier ensure failed (will retry on restart)")
+		}
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to register base-carrier ensurer")
 		os.Exit(1)
 	}
 
