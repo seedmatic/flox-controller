@@ -22,9 +22,9 @@
             pname = "flox-controller";
             inherit version;
             src = ./.;
-            # Scaffold placeholder: run `go mod tidy` + `nix build` once, then set
-            # this to the hash nix prints (deterministic vendoring of the Go deps).
-            vendorHash = pkgs.lib.fakeHash;
+            # Deterministic vendoring of the Go deps. Regenerate after a go.mod change:
+            # set to lib.fakeHash, `nix build`, then paste the hash nix prints.
+            vendorHash = "sha256-L4MK8X4iveyVbBJmJrPXQxh4e+gtuQP1yk0QifYqhUA=";
             subPackages = [ "cmd/flox-controller" ];
             env.CGO_ENABLED = 0;
             ldflags = [ "-s" "-w" "-X main.version=${version}" ];
@@ -54,13 +54,7 @@
           default = flox-controller;
         };
 
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            go
-            gopls
-            kubernetes-controller-tools # controller-gen (deepcopy + CRD)
-            kubectl
-          ];
-        };
+        # Dev toolchain lives in the flox env (.flox/env/manifest.toml): `flox activate`
+        # provides go, controller-gen, kubectl, delve, make.
       });
 }
