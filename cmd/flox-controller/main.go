@@ -13,6 +13,7 @@ import (
 
 	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
 	"github.com/seedmatic/flox-controller/internal/controller"
+	"github.com/seedmatic/flox-controller/internal/provisioner"
 )
 
 var (
@@ -26,8 +27,13 @@ func init() {
 }
 
 func main() {
-	var probeAddr string
+	var probeAddr, envRoot, gcrootBase, ctrBin string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
+	flag.StringVar(&envRoot, "env-root", "/var/lib/flox-controller/envs",
+		"host dir where .flox env sources materialise (<env-root>/<folder>/<name>)")
+	flag.StringVar(&gcrootBase, "gcroot-base", "/nix/var/nix/gcroots/flox-runtime/env",
+		"flox-runtime GC-root dir the NRI plugin reads")
+	flag.StringVar(&ctrBin, "ctr-bin", "ctr", "containerd CLI used to import carrier images")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -51,6 +57,11 @@ func main() {
 	if err := (&controller.FloxEnvReconciler{
 		Client:   mgr.GetClient(),
 		NodeName: nodeName,
+		Provisioner: &provisioner.ExecProvisioner{
+			EnvRoot:    envRoot,
+			GcrootBase: gcrootBase,
+			CtrBin:     ctrBin,
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up controller", "controller", "FloxEnv")
 		os.Exit(1)

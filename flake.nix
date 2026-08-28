@@ -19,12 +19,15 @@
         packages = rec {
           # The controller binary. Static (CGO off) so it runs in a minimal image.
           flox-controller = pkgs.buildGoModule {
-            pname = "flox-controller";
+            # Store-name prefix io.seedmatic.<asset> (org convention, was io.nxmatic
+            # before the seedmatic move) so the artifact is findable in /nix/store;
+            # meta.mainProgram keeps the bin at bin/flox-controller for `nix run`.
+            pname = "io.seedmatic.flox-controller";
             inherit version;
             src = ./.;
             # Deterministic vendoring of the Go deps. Regenerate after a go.mod change:
             # set to lib.fakeHash, `nix build`, then paste the hash nix prints.
-            vendorHash = "sha256-L4MK8X4iveyVbBJmJrPXQxh4e+gtuQP1yk0QifYqhUA=";
+            vendorHash = "sha256-TRKTDXhNP6NNtH0YNWy2tTzhZ6XeQOtgoEfPJk44Gsw=";
             subPackages = [ "cmd/flox-controller" ];
             env.CGO_ENABLED = 0;
             ldflags = [ "-s" "-w" "-X main.version=${version}" ];
@@ -36,13 +39,15 @@
           # into the node-base image via a tmpfiles symlink into
           # /var/lib/rancher/rke2/agent/images/, rke2 auto-imports it into local
           # containerd at boot, and the DaemonSet references
-          # `seedmatic/flox-controller:<version>` with imagePullPolicy: IfNotPresent.
+          # `io.seedmatic.flox-controller:<version>` with imagePullPolicy: IfNotPresent.
           # nix is NOT in the image: the controller execs the NODE's nix (host /nix
           # mounted in) to realise closures onto the host store.
           # NOTE: dockerTools can't build on darwin — build on the aarch64-linux
           # builder (`nix build .#flox-controller-image --system aarch64-linux --max-jobs 0`).
           flox-controller-image = pkgs.dockerTools.buildLayeredImage {
-            name = "seedmatic/flox-controller";
+            # OCI name doubles as the store-path basename → same io.seedmatic.<asset>
+            # prefix for store discoverability + a self-evident image ref.
+            name = "io.seedmatic.flox-controller";
             tag = version;
             contents = [ flox-controller pkgs.cacert ];
             config = {
