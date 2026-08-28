@@ -76,7 +76,10 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 		}
 	}
 
-	storePath, err := p.buildEnv(ctx, dir)
+	// "run" = the lean prod activation closure. A future increment emits BOTH gcroots
+	// (run + dev) per env so a pod can pick the interactive dev closure; for now the
+	// workload gcroot points at the run closure.
+	storePath, err := p.buildEnv(ctx, dir, "run")
 	if err != nil {
 		return RealizeResult{}, err
 	}
@@ -110,33 +113,46 @@ func floxCommandEnv() []string {
 	)
 }
 
-// buildEnv activates the env (which locks-if-needed + realises its closure onto the
-// host store) and resolves the built store path from the run symlink.
+// buildEnv activates the env in the given mode (which locks-if-needed + realises its
+// closure onto the host store) and resolves the built store path from the run symlink.
 //
-// ON-NODE TBD: the exact flox invocation + run-symlink layout is to be pinned
-// against a live node; `flox activate -- true` forces a build and leaves
-// .flox/run/<system>.<name> -> /nix/store/...-environment. The reconcile loop and
-// the GC-root contract around it are correct regardless of this detail.
-func (p *ExecProvisioner) buildEnv(ctx context.Context, dir string) (string, error) {
-	cmd := p.command(ctx, "flox", "activate", "-d", dir, "--", "true")
+// flox materialises ONE run symlink per activation mode (verified on a live node):
+//
+//	.flox/run/<system>.<name>-run -> /nix/store/…-environment-run  (lean: skips [profile] scaffolding)
+//	.flox/run/<system>.<name>-dev -> /nix/store/…-environment-dev  (dev shell scaffolding)
+//
+// Both carry the SAME packages — mode is activation scaffolding, NOT the package set
+// (the flavor lives in which flake output is installed). Select the requested mode's
+// symlink by its "-<mode>" suffix; do NOT return the first /nix/store entry — it sorts
+// to "-dev" alphabetically, which would gcroot the dev scaffolding into a workload pod.
+func (p *ExecProvisioner) buildEnv(ctx context.Context, dir, mode string) (string, error) {
+	cmd := p.command(ctx, "flox", "activate", "--mode", mode, "-d", dir, "--", "true")
 	cmd.Env = floxCommandEnv()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("flox activate %s: %w", dir, err)
+		return "", fmt.Errorf("flox activate (--mode %s) %s: %w", mode, dir, err)
 	}
 	runDir := filepath.Join(dir, ".flox", "run")
 	entries, err := os.ReadDir(runDir)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", runDir, err)
 	}
+	var fallback string
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		target, err := os.Readlink(filepath.Join(runDir, e.Name()))
-		if err == nil && strings.HasPrefix(target, "/nix/store/") {
+		if err != nil || !strings.HasPrefix(target, "/nix/store/") {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), "-"+mode) {
 			return target, nil
 		}
+		fallback = target
+	}
+	if fallback != "" {
+		return fallback, nil // single-mode env: no per-mode suffix present
 	}
 	return "", fmt.Errorf("no /nix/store env path under %s", runDir)
 }
