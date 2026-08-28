@@ -2,7 +2,7 @@
 #
 # `flox containerize` of this env produces the OCI base image that flox-injected pods run
 # on. It is the CANONICAL carrier-contract provider and the root of the carrier
-# composition tree — specialised carriers `[include]` it by path. See docs/design.md
+# composition tree — specialised carriers `[include]` it by path. See docs/design.adoc
 # § Carriers + § The carrier-contract invariant.
 apiVersion: flox.seedmatic.io/v1alpha1
 kind: FloxEnv
@@ -18,13 +18,13 @@ spec:
       bashInteractive: { pkg-path: bashInteractive }   # /bin/sh + bash
       coreutils:       { pkg-path: coreutils }          # /usr/bin/env + core tools
       cacert:          { pkg-path: cacert }             # CA bundle
-    # OPEN — the rest of the carrier CONTRACT is base-image files, NOT flox packages:
-    # real /etc/{passwd,group,nsswitch.conf} (flox activate does getpwuid(0) at start →
-    # needs a REAL /etc/passwd, not a /nix/store symlink — the plugin's /nix overlay would
-    # shadow a store symlink). How does `flox containerize` provide these base files?
-    # candidates: a flox containerize option, a [profile]/hook step, or a thin
-    # post-containerize layer. This is exactly the concrete question this sample surfaces
-    # (design.md § Open / to verify). If flox containerize does NOT provide them, the
-    # `image`-consumption path needs a small post-step that writes them.
+    # The rest of the carrier contract — /etc/{passwd,group,nsswitch.conf} — is provided
+    # by `flox containerize` itself via nixpkgs fakeNss: those are /nix/store symlinks,
+    # not real files (verified spike, flox 1.14; passwd already carries root:x:0:0). No
+    # extra packages needed. They resolve at runtime because the NRI plugin overlays
+    # /nix→/nix with the HOST store as lower, so the image's /nix is disposable and the
+    # host store is authoritative for everything (incl. the entrypoint). Requirement: the
+    # controller realises AND GC-roots the carrier's full containerize closure on each
+    # node. See design.adoc § The carrier-contract invariant.
   update:
     mode: Manual

@@ -1,0 +1,371 @@
+= flox-controller — design
+:toc: left
+:toclevels: 3
+:icons: font
+:source-highlighter: highlight.js
+
+`flox-controller` delivers *flox environments to Kubernetes nodes at runtime*, as
+first-class k8s resources. It is *pure-k8s and reusable* — it knows only
+`(namespace, name)`, never any consumer's conventions (rke2lab's "domain", its
+`environment.d`, its image baking — all of that lives in the _consumer_ and is out of
+scope here).
+
+Two pieces ship from this repo:
+
+* the *`FloxEnv` CRD* (group `flox.seedmatic.io`, `v1alpha1`) — a flox env as a k8s
+  resource;
+* the *controller* — a *node-agent* (one instance per node, run as a DaemonSet) that
+  reconciles each node's local nix store to the desired `FloxEnv` s.
+
+Its companion, the NRI plugin (repo `flox-nri-plugin`), injects an env into a pod at
+container-create; this controller _provisions_ what the plugin injects. See
+<<the-seam-with-the-nri-plugin>>.
+
+[NOTE]
+====
+*Not air-gapped (for now).* Nodes have network; the controller substitutes /
+containerizes freely from the builder + caches. We do *not* build offline logic.
+Air-gap may return as a future constraint — the design must not _preclude_ it, but we
+don't build _for_ it now. Distinct from that: we *do not use FloxHub* — an env's lock is
+resolved from its manifest and held in `status` (determinism + ownership).
+====
+
+== C4 — system context
+
+The controller watches `FloxEnv` CRs and reconciles the node host; the plugin (separate
+component) consumes what it provisions.
+
+[mermaid]
+....
+flowchart TB
+  subgraph k8s["Kubernetes"]
+    cr["FloxEnv CR (flox.seedmatic.io)<br/>spec: manifest(YAML)+folder+consumption+update<br/>status: lock+resolved+realized"]
+    ctl["flox-controller<br/>node-agent DaemonSet (this repo)"]
+    pod["pod: image=carrier + annotation env<br/>(NRI plugin overlays)"]
+    cr -->|watch| ctl
+  end
+  subgraph node["node host"]
+    daemon["nix daemon"]
+    store["host /nix/store + gcroots/flox-runtime"]
+    cd["containerd (carrier images)"]
+  end
+  builder["builder / caches (network)"]
+  ctl -->|"overlay: realise + GC-root"| store
+  ctl -->|"image: flox containerize + import"| cd
+  ctl -->|realise via| daemon
+  daemon -->|substitute| builder
+  store -->|overlay source| pod
+  cd -->|pod base image| pod
+
+  classDef c fill:#dae8fc,stroke:#6c8ebf
+  classDef s fill:#d5e8d4,stroke:#82b366
+  class cr,ctl,pod c
+  class daemon,store,cd,builder s
+....
+
+[.text-center]
+_Blue = k8s API objects / our components; green = node-host resources._
+
+== The `FloxEnv` resource
+
+Designed *maintenance-first*: `spec` is the maintainer-authored INTENT (the flox
+manifest as YAML, the host folder, the update policy); `status` is GENERATED and never
+hand-edited (the lock, what resolved, per-node realisation). Maintaining an env is a
+loop: *introspect `status`, adjust `spec`*.
+
+[source,yaml]
+----
+apiVersion: flox.seedmatic.io/v1alpha1
+kind: FloxEnv
+metadata: { name: kdns, namespace: networking }
+spec:
+  consumption: overlay              # overlay | image   (default: overlay)
+  manifest:                         # the flox manifest AS YAML — a transposition of
+    install:                        #   manifest.toml (SAME shape, not re-modelled)
+      kdns:    { flake: "github:seedmatic/...#kdns" }
+      kubectl: { pkg-path: kubectl }
+    include:                        # flox-native, by PATH → other envs' host folders
+      environments:
+        - dir: ../../flox-system/base
+    vars: { FLOX_FOO: bar }
+    # hook / profile / options / services — whatever flox supports
+  update: { mode: Manual }          # lock-refresh policy (Manual | Track)
+  folder: networking                # host-layout path; default = metadata.namespace
+status:
+  lock: "..."                       # GENERATED — the resolved manifest.lock (the pin)
+  resolved: { kdns: 0.2.15 }        # GENERATED — what each package resolved to
+  realized:
+    - { node: node-a, ready: true, storePath: /nix/store/...-env }
+----
+
+* *`spec` = intent.* `manifest` — the *flox manifest as YAML*, a faithful transposition
+  of `manifest.toml` (same shape, NOT re-modelled: `install`, `include`, `vars`, `hook`,
+  …); the controller serialises it back to `manifest.toml`. Composition stays
+  *flox-native*: `include` uses PATHS (`../../<folder>/<name>`) that resolve to other
+  envs' host folders — the CR does not model includes (no CR{nbsp}↔{nbsp}manifest
+  conflict). `update` (lock-refresh policy); `folder` (the HOST-materialisation path —
+  dissociated from the k8s namespace, MAY be structured like `mesh/base`, defaults to
+  `metadata.namespace`; it is what other envs' `include` paths resolve against).
+* *`status` = generated, never hand-edited.* `lock` (the resolved `manifest.lock`, the
+  deterministic pin), `resolved` (what each package resolved to — inspection), `realized`
+  (per-node; the plugin/consumers read the resolved `storePath`).
+* *The lock lives in `status`* so the maintenance loop is _introspect (`status`) → adjust
+  (`spec`)_ — you never hand-edit a lock; you edit the manifest and the lock refreshes.
+  The node-agent *never locks* (no per-node drift); it realises `status.lock` verbatim.
+
+[IMPORTANT]
+====
+*Open axis — who produces `status.lock`.* Locking resolves the manifest against a
+catalog. Options: the operator *env-bumper* (catalog access stays at the operator, no
+in-cluster FloxHub) vs an in-cluster *lock-controller* reacting to `spec` changes per
+`spec.update` (more automatic, but needs in-cluster catalog access → FloxHub or a
+self-hosted catalog). We avoid FloxHub → leans operator-bumper or a local catalog.
+To settle.
+====
+
+=== Consumption modes
+
+A `FloxEnv` is consumed one of two ways — the CR's `spec.consumption` marks which, and
+the controller branches on it:
+
+[cols="1,3,2",options="header"]
+|===
+| `consumption` | The controller… | Used as
+
+| `overlay` (default)
+| realises the closures onto the host `/nix/store` + writes the `flox-runtime` GC-roots
+| a workload env the NRI plugin overlays into a pod at container-create
+
+| `image`
+| realises the closures + *`flox containerize` s* the env + imports the image into the
+  node's containerd
+| a *carrier* — the OCI base image a pod's rootfs runs on
+|===
+
+The `FloxEnv` definition + `[include]` composition are the *shared abstraction*; only
+the consumer differs.
+
+== The controller (node-agent)
+
+One instance per node (DaemonSet). Each instance reconciles *its own node* (from the
+Downward API `NODE_NAME`) and patches that node's `status.realized` entry. It is the
+*sole writer* of the node's `gcroots/flox-runtime/` subtree and of the flox env layout
+under `<envroot>/`.
+
+.Reconcile-to-desired, one pass per node
+[mermaid]
+....
+sequenceDiagram
+  participant K as k8s API (FloxEnv CRs)
+  participant C as flox-controller (this node)
+  participant N as node nix daemon
+  participant S as host /nix/store + gcroots
+  participant D as containerd
+
+  K->>C: watch desired FloxEnv set
+  loop for each desired env
+    C->>S: serialise spec.manifest (YAML→TOML) at envroot/folder/name
+    C->>N: realise status.lock closures
+    N->>S: store paths present
+    alt consumption == overlay
+      C->>S: write GC-root(s)
+    else consumption == image
+      C->>D: flox containerize + import image
+    end
+    C->>K: patch status.realized[node]
+  end
+  C->>S: prune layout + GC-roots no longer desired (sole writer)
+....
+
+Disk reclaim of pruned closures is a separate `nix.gc` cadence (not the controller's
+job).
+
+== Carriers (`FloxEnv`, `consumption: image`)
+
+A *carrier* is the OCI base image a flox pod runs on — deliberately minimal: it only
+needs what `flox activate` requires to bootstrap. The workload's binaries do *not* live
+in it; they ride the `/nix` overlay the NRI plugin mounts.
+
+* *Containerized ON the node* by the controller (`flox containerize` from the
+  materialised env → import into containerd), *not* baked at image-build. Because every
+  `FloxEnv` is materialised on the node, *specialising a carrier is cheap*: a new `image`
+  `FloxEnv` that `[include]` s the base carrier + its extras, re-containerized locally
+  (the base's closures are already present → mostly cache-hit).
+* *Chicken-and-egg is resolved*: the _controller's own_ image is provided by the consumer
+  as a foundation artifact (this repo's `flox-controller-image`); the controller needs no
+  carrier to start, and it produces the carriers for workload pods. Ordering to the first
+  workload pod is handled by the plugin being fail-closed + Kubernetes retry.
+
+[[the-carrier-contract-invariant]]
+=== The carrier-contract invariant
+
+Every `image` `FloxEnv` used as a carrier *must satisfy the carrier contract* — the
+minimum `flox activate` needs to bootstrap:
+
+* `/usr/bin/env`, a shell + coreutils,
+* `/etc/{passwd,group,nsswitch.conf}` (flox activate does `getpwuid(0)` at start — no
+  resolvable `/etc/passwd` ⇒ it dies `ENOENT`),
+* a CA bundle.
+
+==== How `flox containerize` satisfies it (verified spike, flox 1.14)
+
+The `/etc` files are provided as nixpkgs *`fakeNss`* entries: in the image rootfs,
+`/etc/{passwd,group,nsswitch.conf,ssl}` are *symlinks into `/nix/store/…-fake-nss`* (the
+`passwd` content is already correct — `root:x:0:0:…:/bin/sh` + `nobody`). They are *not
+real files*. This is NOT a problem here, because of how the runtime works — the pattern
+below.
+
+.The `/nix` is disposable; the host `/nix` is authoritative
+[mermaid]
+....
+flowchart LR
+  subgraph img["carrier OCI image (rootfs)"]
+    etc["/etc/passwd (symlink)<br/>→ /nix/store/…-fake-nss/…"]
+    inix["image /nix<br/>(fake-nss, passwd, env)"]
+  end
+  subgraph run["running container (after NRI CreateContainer hook)"]
+    mnt["overlayfs mounted AT /nix<br/>lower = HOST /nix (ro)<br/>upper = empty tmpfs"]
+    etc2["/etc/passwd (symlink, kept)<br/>→ /nix/store/…-fake-nss/…"]
+  end
+  host["HOST /nix/store<br/>(controller realised + GC-rooted<br/>the FULL containerize closure)"]
+
+  inix -. "shadowed wholesale" .-> mnt
+  etc --> etc2
+  etc2 -->|"target resolves via"| mnt
+  mnt -->|lower| host
+
+  classDef bad fill:#f8cecc,stroke:#b85450
+  classDef ok fill:#d5e8d4,stroke:#82b366
+  class inix bad
+  class host,mnt ok
+....
+
+* The NRI plugin overlays *`/nix → /nix`* with the *host `/nix` as the read-only lower*
+  and an empty tmpfs upper — it *replaces the image's own `/nix` wholesale*. So the
+  image's `/nix` is *disposable*; the *host `/nix` is authoritative* for _everything_ the
+  carrier references — including its own entrypoint, which is a store path
+  (`…-environment-dev/libexec/flox-activations`).
+* Hence the `fakeNss` symlinks are *no more fragile than the entrypoint*: they resolve
+  *iff* their store paths are present on the *host* store — exactly the condition the
+  whole carrier already requires (without its closure on the host it cannot even start).
+* Therefore *no real-file post-step is needed* (its robustness would be illusory — a real
+  `/etc/passwd` saves nothing when the entrypoint store path is absent). The one
+  requirement: *the controller must realise AND GC-root the carrier's FULL containerize
+  closure* (superset of the activation closure: `environment-dev` + `fake-nss` +
+  `passwd`/`group`/`nsswitch` + cacert + shell/coreutils) on *every node* that runs the
+  carrier — else `nix.gc` reaps `fake-nss` and the symlink dangles.
+
+This is the root cause of the earlier baked-image regression: the baked model cooked
+`fakeNss` into the image but never realised it on the host, so the `/nix → host /nix`
+overlay left it dangling. The controller model fixes that by realising the carrier ON the
+node.
+
+==== Composing a carrier
+
+A carrier satisfies the contract *either* by `[include]`-ing the *default/base carrier*
+(which provides it — the easy, cheap path since the base is materialised) *or* by
+providing the equivalent itself. The base carrier `FloxEnv` is the *canonical contract
+provider and the root of the carrier composition tree*.
+
+.Do / don't
+[cols="1,1",options="header"]
+|===
+| ✅ Do | ❌ Don't
+
+| `[include]` the base carrier by path, add only your extras — cheap (base already
+  materialised, mostly cache-hit)
+| Re-declare the full contract (shell, coreutils, `fakeNss`, cacert) in every carrier —
+  duplication that drifts
+
+| Rely on `flox containerize` + the controller realising/GC-rooting the closure
+| Add a "real `/etc/passwd`" post-step — unnecessary, and its safety is illusory (see
+  the pattern above)
+|===
+
+Enforcement (design pending): a validating admission check — reject/flag a carrier that
+neither includes the base nor carries a `self-provides-contract` marker.
+
+[[the-seam-with-the-nri-plugin]]
+== The seam with the NRI plugin
+
+The plugin (repo `flox-nri-plugin`) is a *separate component*. The `FloxEnv` CR is the
+shared contract both read.
+
+[mermaid]
+....
+flowchart LR
+  cr["FloxEnv CR<br/>(shared contract)"]
+  subgraph ctlside["flox-controller (this repo)"]
+    prov["provisions:<br/>closures + GC-roots (overlay)<br/>carrier images in containerd (image)<br/>OWNS status"]
+  end
+  subgraph plugside["flox-nri-plugin (companion)"]
+    inj["at container-create:<br/>resolve annotation → CR<br/>overlay host /nix<br/>flox activate"]
+  end
+  cr --> prov
+  cr --> inj
+  prov -->|"status.realized[node]"| inj
+
+  classDef c fill:#dae8fc,stroke:#6c8ebf
+  class prov,inj,cr c
+....
+
+* *Controller* — provisions: closures + GC-roots on the node (overlay envs), carrier
+  images in containerd (image envs). Owns `status`.
+* *Plugin* — at container-create, resolves a pod's `flox.seedmatic.io/environment.<c>`
+  annotation to a `FloxEnv` CR, overlays the host `/nix` into the container, and runs
+  `flox activate`. It is *carrier-agnostic* — it works with whatever contract-satisfying
+  carrier the pod chose (the carrier is set on the pod's `image:` at admission by the
+  author or a mutating webhook, never by the plugin).
+
+== Verified (spike, flox 1.14 on a linux node)
+
+* *`flox containerize` without FloxHub* ✅ — the daemonless tar build succeeds from a
+  LOCAL env with only a `not logged in to FloxHub` *warning* (exit 0). No FloxHub
+  round-trip. (On macOS containerize requires a local runtime that can bind local paths;
+  on linux it writes the tar via a pure nix derivation, no daemon — the faithful path,
+  since the target is linux nodes anyway.)
+* *Carrier-contract provisioning* ✅ — resolved: `fakeNss` symlinks + host-store
+  realisation, no real-file post-step (see <<the-carrier-contract-invariant>>). `flox
+  containerize` has *no file-injection lever* — `[containerize.config]` (experimental)
+  exposes only OCI config (`user`, `cmd`, `exposed-ports`, `volumes`, `working-dir`,
+  `labels`, `stop-signal`); `user` adds a passwd/group _entry_ but still via `fakeNss`.
+
+== Open / to verify
+
+* *Carrier-contract enforcement* — the admission check shape (`[include]` base vs a
+  `self-provides-contract` marker).
+* *Reconcile status ordering* — the plugin is fail-closed; confirm containerd's NRI knob
+  propagates a create error to a k8s retry.
+* *GC-root the carrier image closure* — the controller's `image` branch must GC-root the
+  full containerize closure (not just the activation closure) on each node, so `nix.gc`
+  never reaps `fake-nss`/`passwd`/`group` out from under the image's `/etc` symlinks.
+
+== Troubleshooting
+
+[cols="2,3",options="header"]
+|===
+| Symptom | Cause / fix
+
+| `flox activate` dies `ENOENT` on `/etc/passwd` in a carrier pod
+| The `fakeNss` store path is absent from the *host* `/nix/store` (or was GC'd). Ensure
+  the controller realised AND GC-rooted the carrier's *full containerize closure* on that
+  node — not just the activation closure.
+
+| Carrier pod can't start / entrypoint missing
+| Same root cause: the host `/nix` (the overlay lower) lacks the carrier closure. The
+  image's own `/nix` is shadowed wholesale — realise the closure on the node.
+
+| `flox containerize` errors `statfs …: no such file or directory` on macOS
+| A *remote* docker/podman daemon can't bind local paths. Containerize needs a *local*
+  runtime, or run on a linux node (daemonless nix-tar path, no daemon).
+
+| Lock changes per node / non-deterministic realisation
+| The node-agent must *never* lock — it realises `status.lock` verbatim. Locking is the
+  lock-producer's job (see the open axis above).
+|===
+
+== Related
+
+* `flox-nri-plugin` — the injection companion (overlay + `flox activate`).
+* The consumer's integration view (e.g. rke2lab): how `FloxEnv` CRs are synthesised, how
+  the controller + plugin images are delivered, and the node-substrate atlas.

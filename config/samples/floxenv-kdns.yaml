@@ -1,6 +1,6 @@
 # A workload env (consumption: overlay) — the NRI plugin overlays it into a pod at
 # container-create, on top of whatever carrier the pod chose. Contrast with the carrier
-# (consumption: image). See docs/design.md § Consumption modes.
+# (consumption: image). See docs/design.adoc § Consumption modes.
 apiVersion: flox.seedmatic.io/v1alpha1
 kind: FloxEnv
 metadata:
