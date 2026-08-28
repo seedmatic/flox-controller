@@ -21,30 +21,51 @@ import (
 //go:embed base-carrier.yaml
 var baseCarrierYAML []byte
 
-// EnsureBase creates the base carrier FloxEnv in namespace if absent — a DEFAULT that
-// never clobbers an operator's override. The normal reconcile loop then containerizes
-// it and imports the carrier into the node's containerd.
+// managedByLabel marks the base carrier as owned by the controller. On startup EnsureBase
+// updates a still-marked CR to the embedded spec (so a new controller version's carrier
+// definition propagates); an operator who forks it by removing the label is left untouched.
+const (
+	managedByLabel = "app.kubernetes.io/managed-by"
+	managedByValue = "flox-controller"
+)
+
+// EnsureBase reconciles the embedded base carrier FloxEnv in namespace on startup: create it if
+// absent, or update its spec to the embedded definition if the controller still owns it (the
+// managed-by label). It never clobbers an operator override (label removed → left as-is).
 func EnsureBase(ctx context.Context, c client.Client, namespace string) error {
-	var env floxv1alpha1.FloxEnv
-	if err := yaml.Unmarshal(baseCarrierYAML, &env); err != nil {
+	var desired floxv1alpha1.FloxEnv
+	if err := yaml.Unmarshal(baseCarrierYAML, &desired); err != nil {
 		return fmt.Errorf("parse embedded base carrier: %w", err)
 	}
-	env.Namespace = namespace
+	desired.Namespace = namespace
+	if desired.Labels == nil {
+		desired.Labels = map[string]string{}
+	}
+	desired.Labels[managedByLabel] = managedByValue
+	log := log.FromContext(ctx)
 
 	var existing floxv1alpha1.FloxEnv
-	err := c.Get(ctx, client.ObjectKeyFromObject(&env), &existing)
+	err := c.Get(ctx, client.ObjectKeyFromObject(&desired), &existing)
 	switch {
 	case apierrors.IsNotFound(err):
-		if err := c.Create(ctx, &env); err != nil {
+		if err := c.Create(ctx, &desired); err != nil {
 			return fmt.Errorf("create base carrier: %w", err)
 		}
-		log.FromContext(ctx).Info("ensured base carrier FloxEnv",
-			"namespace", namespace, "name", env.Name)
+		log.Info("created base carrier FloxEnv", "namespace", namespace, "name", desired.Name)
 		return nil
 	case err != nil:
 		return fmt.Errorf("get base carrier: %w", err)
 	default:
-		// Already present — leave the operator's version untouched.
+		if existing.Labels[managedByLabel] != managedByValue {
+			// An operator forked it (removed our label) — leave their version untouched.
+			return nil
+		}
+		existing.Spec = desired.Spec // propagate the embedded definition
+		if err := c.Update(ctx, &existing); err != nil {
+			return fmt.Errorf("update base carrier: %w", err)
+		}
+		log.Info("updated base carrier FloxEnv to embedded spec",
+			"namespace", namespace, "name", desired.Name)
 		return nil
 	}
 }
