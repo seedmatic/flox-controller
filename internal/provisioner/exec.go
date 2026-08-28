@@ -34,12 +34,20 @@ func (p *ExecProvisioner) gcrootPath(ref EnvRef) string {
 // and (image) containerizes + imports.
 func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (RealizeResult, error) {
 	dir := p.envDir(req.Ref)
-	floxEnv := filepath.Join(dir, ".flox", "env")
+	floxDir := filepath.Join(dir, ".flox")
+	floxEnv := filepath.Join(floxDir, "env")
 	if err := os.MkdirAll(floxEnv, 0o755); err != nil {
 		return RealizeResult{}, fmt.Errorf("mkdir %s: %w", floxEnv, err)
 	}
 	if err := os.WriteFile(filepath.Join(floxEnv, "manifest.toml"), req.ManifestTOML, 0o644); err != nil {
 		return RealizeResult{}, fmt.Errorf("write manifest.toml: %w", err)
+	}
+	// flox requires .flox/env.json (the env identity marker) alongside env/manifest.toml —
+	// without it `flox activate` fails "unable to locate an env.json". `flox init` writes it;
+	// we materialise the whole .flox by hand, so we write it too.
+	envJSON := fmt.Sprintf("{\"name\": %q, \"version\": 1}\n", req.Ref.Name)
+	if err := os.WriteFile(filepath.Join(floxDir, "env.json"), []byte(envJSON), 0o644); err != nil {
+		return RealizeResult{}, fmt.Errorf("write env.json: %w", err)
 	}
 	// The node-agent never locks: it writes status.lock verbatim and realises it.
 	if req.Lock != "" {
