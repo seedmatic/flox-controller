@@ -17,6 +17,7 @@ import (
 	"github.com/seedmatic/flox-controller/internal/carrier"
 	"github.com/seedmatic/flox-controller/internal/controller"
 	"github.com/seedmatic/flox-controller/internal/provisioner"
+	floxwebhook "github.com/seedmatic/flox-controller/internal/webhook"
 )
 
 var (
@@ -63,6 +64,12 @@ func main() {
 	}
 	flag.StringVar(&baseCarrierNamespace, "base-carrier-namespace", defaultCarrierNs,
 		"namespace for the controller's embedded base carrier FloxEnv")
+	var enableWebhook bool
+	var waitImage string
+	flag.BoolVar(&enableWebhook, "enable-webhook", false,
+		"run the pod flox-wait mutating webhook (cluster-manager mode; needs TLS certs) — off in the node-agent DaemonSet")
+	flag.StringVar(&waitImage, "flox-wait-image", "busybox:stable",
+		"image for the injected flox-wait init container (needs /bin/sh)")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -118,6 +125,21 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up controller", "controller", "FloxFlake")
 		os.Exit(1)
+	}
+
+	// The pod flox-wait mutating webhook runs only in the cluster-manager Deployment
+	// (--enable-webhook): serving it needs TLS certs the node-agent DaemonSet has no
+	// reason to carry. It injects the node-aware race barrier into flox-annotated pods.
+	if enableWebhook {
+		if err := (&floxwebhook.PodFloxWaitInjector{
+			GcrootBase:     gcrootBase,
+			WaitImage:      waitImage,
+			TimeoutSeconds: 120,
+		}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up webhook", "webhook", "PodFloxWait")
+			os.Exit(1)
+		}
+		setupLog.Info("pod flox-wait mutating webhook enabled")
 	}
 
 	// Self-provision the controller's own base carrier once the cache is up. Best-effort:
