@@ -59,6 +59,10 @@
               mkdir -p usr/local/bin etc/ssl/certs
               cp ${flox-controller}/bin/flox-controller usr/local/bin/flox-controller
               cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt etc/ssl/certs/ca-bundle.crt
+              # STATIC nsenter (real file, not shadowed by the host /nix overlay): the controller
+              # execs it to reach the node's flox/nix/ctr from inside the DaemonSet. A dynamic
+              # nsenter would dangle under the mount, like a store-path binary would.
+              cp ${pkgs.pkgsStatic.util-linux}/bin/nsenter usr/local/bin/nsenter
             '';
             config = {
               Entrypoint = [ "/usr/local/bin/flox-controller" ];

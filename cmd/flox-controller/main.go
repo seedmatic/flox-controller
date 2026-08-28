@@ -29,8 +29,21 @@ func init() {
 	utilruntime.Must(floxv1alpha1.AddToScheme(scheme))
 }
 
+// inSeparateMountNamespaceFromInit reports whether this process runs in a mount namespace
+// distinct from PID 1's — i.e. inside a container, so host tools need nsenter to reach. With
+// the DaemonSet's hostPID, /proc/1 is the node's init: a pod sees a different mnt ns (true),
+// a bare host process (the nix-run) sees the same (false). Unreadable /proc ⇒ assume host.
+func inSeparateMountNamespaceFromInit() bool {
+	self, err1 := os.Readlink("/proc/self/ns/mnt")
+	init, err2 := os.Readlink("/proc/1/ns/mnt")
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return self != init
+}
+
 func main() {
-	var probeAddr, envRoot, gcrootBase, ctrBin, containerdAddress, baseCarrierNamespace string
+	var probeAddr, envRoot, gcrootBase, ctrBin, containerdAddress, nsenterBin, baseCarrierNamespace string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
 	flag.StringVar(&envRoot, "env-root", "/var/lib/flox-controller/envs",
 		"host dir where .flox env sources materialise (<env-root>/<folder>/<name>)")
@@ -40,6 +53,8 @@ func main() {
 		"containerd CLI used to import carrier images (rke2 ships it here, off the default PATH)")
 	flag.StringVar(&containerdAddress, "containerd-address", "/run/k3s/containerd/containerd.sock",
 		"containerd socket ctr imports into (rke2's k3s-containerd)")
+	flag.StringVar(&nsenterBin, "nsenter-bin", "/usr/local/bin/nsenter",
+		"nsenter used to reach host tools when containerized (baked real-file); empty disables")
 	// The controller owns its base carrier: it self-provisions it (see internal/carrier).
 	// Defaults to the controller's own namespace (always exists), else flox-system.
 	defaultCarrierNs := os.Getenv("POD_NAMESPACE")
@@ -59,6 +74,18 @@ func main() {
 	// Node-agent: this pod reconciles its own node (NODE_NAME via the Downward API).
 	nodeName := os.Getenv("NODE_NAME")
 
+	// One binary, two contexts: run directly on the node (the nix-run — host tools found
+	// natively) or inside the DaemonSet (host tools reachable only via nsenter into PID 1's
+	// namespaces). Auto-detect by comparing our mount namespace to the host init's (needs
+	// hostPID, which the DaemonSet sets); same ns ⇒ we ARE the host ⇒ exec directly.
+	nsenter := ""
+	if inSeparateMountNamespaceFromInit() {
+		nsenter = nsenterBin
+		setupLog.Info("host tools via nsenter (containerized)", "nsenter", nsenter)
+	} else {
+		setupLog.Info("host tools exec'd directly (running on the node)")
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: probeAddr,
@@ -76,6 +103,7 @@ func main() {
 			GcrootBase:        gcrootBase,
 			CtrBin:            ctrBin,
 			ContainerdAddress: containerdAddress,
+			Nsenter:           nsenter,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up controller", "controller", "FloxEnv")

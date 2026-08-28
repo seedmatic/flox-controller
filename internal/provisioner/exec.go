@@ -19,11 +19,27 @@ import (
 //     /var/lib/rancher/rke2/bin/ctr — not on the default PATH).
 //   - ContainerdAddress: the containerd socket ctr talks to (rke2 = /run/k3s/…); passed as
 //     ctr --address, so the import lands in the node's containerd, not ctr's default socket.
+//   - Nsenter: when non-empty, flox/ctr are exec'd through `nsenter -t 1 -m -p --` so they run
+//     in the HOST's namespaces (needed inside the DaemonSet, where host tools aren't reachable
+//     from the container). Empty when the controller runs directly on the node (the nix-run) —
+//     tools are found natively. main.go auto-detects which (mount-namespace vs host PID 1).
 type ExecProvisioner struct {
 	EnvRoot           string
 	GcrootBase        string
 	CtrBin            string
 	ContainerdAddress string
+	Nsenter           string
+}
+
+// command builds an *exec.Cmd for a host tool (flox/ctr). When Nsenter is set the tool runs in
+// the host's mount+pid namespaces (container case); otherwise it is exec'd directly (host case).
+// The caller's env (see floxCommandEnv) is preserved either way — nsenter does not reset it.
+func (p *ExecProvisioner) command(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if p.Nsenter != "" {
+		full := append([]string{"--target", "1", "--mount", "--pid", "--", name}, args...)
+		return exec.CommandContext(ctx, p.Nsenter, full...)
+	}
+	return exec.CommandContext(ctx, name, args...)
 }
 
 func (p *ExecProvisioner) envDir(ref EnvRef) string {
@@ -98,7 +114,7 @@ func floxCommandEnv() []string {
 // .flox/run/<system>.<name> -> /nix/store/...-environment. The reconcile loop and
 // the GC-root contract around it are correct regardless of this detail.
 func (p *ExecProvisioner) buildEnv(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "flox", "activate", "-d", dir, "--", "true")
+	cmd := p.command(ctx, "flox", "activate", "-d", dir, "--", "true")
 	cmd.Env = floxCommandEnv()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -143,7 +159,7 @@ func (p *ExecProvisioner) writeGcroot(ref EnvRef, storePath string) error {
 // into containerd's k8s.io namespace.
 func (p *ExecProvisioner) containerizeAndImport(ctx context.Context, dir string) error {
 	tar := filepath.Join(dir, ".flox", "containerize.tar")
-	build := exec.CommandContext(ctx, "flox", "containerize", "-d", dir, "-f", tar)
+	build := p.command(ctx, "flox", "containerize", "-d", dir, "-f", tar)
 	build.Env = floxCommandEnv()
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
@@ -158,7 +174,7 @@ func (p *ExecProvisioner) containerizeAndImport(ctx context.Context, dir string)
 		args = append(args, "--address", p.ContainerdAddress)
 	}
 	args = append(args, "-n", "k8s.io", "images", "import", tar)
-	imp := exec.CommandContext(ctx, ctr, args...)
+	imp := p.command(ctx, ctr, args...)
 	imp.Stderr = os.Stderr
 	if err := imp.Run(); err != nil {
 		return fmt.Errorf("ctr images import: %w", err)
