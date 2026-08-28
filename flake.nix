@@ -49,12 +49,19 @@
             # prefix for store discoverability + a self-evident image ref.
             name = "io.seedmatic.flox-controller";
             tag = version;
-            contents = [ flox-controller pkgs.cacert ];
+            # The controller mounts the HOST /nix at /nix (to realise closures + GC-roots and
+            # exec the node's flox/nix/ctr) — which SHADOWS the image's own /nix/store. So its
+            # binary + cacert must be REAL files OUTSIDE /nix, else the entrypoint (and any
+            # /nix/store path) dangles under the mount — the chicken-and-egg. Same real-file
+            # lesson as the flox carrier's /etc. The Go binary is static (CGO off) → a plain copy
+            # runs standalone; it needs the mounted /nix only to FIND flox/nix/ctr on PATH.
+            extraCommands = ''
+              mkdir -p usr/local/bin etc/ssl/certs
+              cp ${flox-controller}/bin/flox-controller usr/local/bin/flox-controller
+              cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt etc/ssl/certs/ca-bundle.crt
+            '';
             config = {
-              # Reference the binary by its store path: buildLayeredImage's `contents`
-              # does not symlink the package into /bin here, but the store path is in the
-              # image closure — the robust single-binary idiom.
-              Entrypoint = [ "${flox-controller}/bin/flox-controller" ];
+              Entrypoint = [ "/usr/local/bin/flox-controller" ];
               Env = [ "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt" ];
             };
           };
