@@ -61,6 +61,16 @@ type NodeRealization struct {
 	// +optional
 	StorePath string `json:"storePath,omitempty"`
 
+	// EnvPath is the .flox source dir on the node (<env-root>/<folder>/<name>) — where the
+	// operator can cd to read the manifest/lock/run. Inspection aid, not a contract.
+	// +optional
+	EnvPath string `json:"envPath,omitempty"`
+
+	// GcrootPath is the flox-runtime GC-root on the node the NRI plugin readlinks to resolve
+	// this env (<gcroot-base>/<folder>/<name>) — the producer↔plugin handoff. Inspection aid.
+	// +optional
+	GcrootPath string `json:"gcrootPath,omitempty"`
+
 	// ObservedGeneration is the FloxEnv generation this realisation reflects.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -99,6 +109,7 @@ type FloxEnvStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=fenv
 // +kubebuilder:printcolumn:name="Consumption",type=string,JSONPath=`.spec.consumption`
 // +kubebuilder:printcolumn:name="Folder",type=string,JSONPath=`.spec.folder`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // FloxEnv is a flox environment as a first-class Kubernetes resource.

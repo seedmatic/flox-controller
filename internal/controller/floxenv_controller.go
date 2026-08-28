@@ -76,6 +76,8 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		Node:               r.NodeName,
 		Ready:              true,
 		StorePath:          res.StorePath,
+		EnvPath:            res.EnvPath,
+		GcrootPath:         res.GcrootPath,
 		ObservedGeneration: env.Generation,
 	})
 	meta.SetStatusCondition(&env.Status.Conditions, metav1.Condition{

@@ -26,10 +26,12 @@ type RealizeRequest struct {
 	Consumption string
 }
 
-// RealizeResult reports the realised env store path (what the NRI plugin resolves
-// to via the GC-root).
+// RealizeResult reports where the env landed on the node: the built store path (what the NRI
+// plugin resolves to via the GC-root) plus the on-node inspection coordinates.
 type RealizeResult struct {
-	StorePath string
+	StorePath  string
+	EnvPath    string
+	GcrootPath string
 }
 
 // Provisioner performs the host-side reconciliation on the LOCAL node: materialise

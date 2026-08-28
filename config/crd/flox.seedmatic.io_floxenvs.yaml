@@ -23,6 +23,9 @@ spec:
     - jsonPath: .spec.folder
       name: Folder
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -172,6 +175,16 @@ spec:
                   description: NodeRealization reports one node's realisation of the
                     env.
                   properties:
+                    envPath:
+                      description: |-
+                        EnvPath is the .flox source dir on the node (<env-root>/<folder>/<name>) — where the
+                        operator can cd to read the manifest/lock/run. Inspection aid, not a contract.
+                      type: string
+                    gcrootPath:
+                      description: |-
+                        GcrootPath is the flox-runtime GC-root on the node the NRI plugin readlinks to resolve
+                        this env (<gcroot-base>/<folder>/<name>) — the producer↔plugin handoff. Inspection aid.
+                      type: string
                     node:
                       description: Node is the node name.
                       type: string

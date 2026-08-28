@@ -88,7 +88,11 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 			return RealizeResult{}, err
 		}
 	}
-	return RealizeResult{StorePath: storePath}, nil
+	return RealizeResult{
+		StorePath:  storePath,
+		EnvPath:    dir,
+		GcrootPath: p.gcrootPath(req.Ref),
+	}, nil
 }
 
 // floxCommandEnv is the environment for flox subprocesses. The key one is
