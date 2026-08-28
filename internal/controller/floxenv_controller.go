@@ -29,7 +29,7 @@ type FloxEnvReconciler struct {
 	Provisioner provisioner.Provisioner
 }
 
-// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs/status,verbs=get;update;patch
 
 // Reconcile realises the desired FloxEnv onto this node's host /nix/store.
