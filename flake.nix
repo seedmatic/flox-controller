@@ -51,7 +51,10 @@
             tag = version;
             contents = [ flox-controller pkgs.cacert ];
             config = {
-              Entrypoint = [ "/bin/flox-controller" ];
+              # Reference the binary by its store path: buildLayeredImage's `contents`
+              # does not symlink the package into /bin here, but the store path is in the
+              # image closure — the robust single-binary idiom.
+              Entrypoint = [ "${flox-controller}/bin/flox-controller" ];
               Env = [ "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt" ];
             };
           };
