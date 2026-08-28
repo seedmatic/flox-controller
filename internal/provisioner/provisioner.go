@@ -32,6 +32,12 @@ type RealizeResult struct {
 	StorePath  string
 	EnvPath    string
 	GcrootPath string
+	// Lock is the manifest.lock flox produced when it locked the env (empty if the env was
+	// realised from a lock supplied in the request). The reconciler captures it into
+	// status.lock — the CR's pin-of-record, fed back verbatim on subsequent reconciles.
+	// Deterministic because the flake ref is a commit-pinned tarball, so every node locks
+	// identically (no per-node drift).
+	Lock string
 }
 
 // Provisioner performs the host-side reconciliation on the LOCAL node: materialise

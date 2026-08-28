@@ -91,10 +91,14 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 			return RealizeResult{}, err
 		}
 	}
+	// Capture the lock flox settled on (the one we wrote if req.Lock was set, else the one
+	// activate produced) so the reconciler can pin it into status.lock.
+	lock, _ := os.ReadFile(filepath.Join(floxEnv, "manifest.lock"))
 	return RealizeResult{
 		StorePath:  storePath,
 		EnvPath:    dir,
 		GcrootPath: p.gcrootPath(req.Ref),
+		Lock:       string(lock),
 	}, nil
 }
 

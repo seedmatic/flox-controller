@@ -85,6 +85,9 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	base := env.DeepCopy()
+	if res.Lock != "" {
+		env.Status.Lock = res.Lock // pin-of-record; fed back verbatim (RealizeRequest.Lock) next reconcile
+	}
 	upsertRealization(&env.Status, floxv1alpha1.NodeRealization{
 		Node:               r.NodeName,
 		Ready:              true,
