@@ -75,6 +75,21 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 	return RealizeResult{StorePath: storePath}, nil
 }
 
+// floxCommandEnv is the environment for flox subprocesses. The key one is
+// _FLOX_TESTING_DISABLE_BG_SIDE_EFFECTS=true: without it every `flox activate` spawns a
+// DETACHED check-for-upgrades that runs `nix eval --refresh` — it races the .flox lock
+// between rapid reconciles (intermittent `flox activate: exit status 1`) and can OOM. It is
+// an internal flox knob (check_for_upgrades.rs), the only mechanism today (mirrors the
+// flox-nri-plugin). The rest quiet metrics/telemetry (as the flox-runtime ConfigMap does).
+func floxCommandEnv() []string {
+	return append(os.Environ(),
+		"_FLOX_TESTING_DISABLE_BG_SIDE_EFFECTS=true",
+		"FLOX_DISABLE_METRICS=true",
+		"FLOX_NO_TELEMETRY=1",
+		"FLOX_NONINTERACTIVE=1",
+	)
+}
+
 // buildEnv activates the env (which locks-if-needed + realises its closure onto the
 // host store) and resolves the built store path from the run symlink.
 //
@@ -84,6 +99,7 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 // the GC-root contract around it are correct regardless of this detail.
 func (p *ExecProvisioner) buildEnv(ctx context.Context, dir string) (string, error) {
 	cmd := exec.CommandContext(ctx, "flox", "activate", "-d", dir, "--", "true")
+	cmd.Env = floxCommandEnv()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("flox activate %s: %w", dir, err)
@@ -128,6 +144,7 @@ func (p *ExecProvisioner) writeGcroot(ref EnvRef, storePath string) error {
 func (p *ExecProvisioner) containerizeAndImport(ctx context.Context, dir string) error {
 	tar := filepath.Join(dir, ".flox", "containerize.tar")
 	build := exec.CommandContext(ctx, "flox", "containerize", "-d", dir, "-f", tar)
+	build.Env = floxCommandEnv()
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		return fmt.Errorf("flox containerize %s: %w", dir, err)
