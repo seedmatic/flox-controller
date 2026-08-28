@@ -36,9 +36,18 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          FloxFlake binds a nix flake (a workload-package catalog) to a Flux source, so FloxEnvs
-          can reference its outputs symbolically and the controller resolves them from the
-          source's reconciled in-cluster artifact (exact commit, no external fetch/token).
+          FloxFlake binds a nix flake (a workload-package catalog) to a Flux source.
+
+          Reconciliation: the controller reads the referenced GitRepository's status.artifact —
+          the in-cluster tarball Flux's source-controller serves at the reconciled commit (Flux
+          already fetched + authenticated it, so there is no external fetch and no token here) —
+          and derives status.flakeRef = "tarball+<artifact-url>?dir=<spec.dir>", the concrete nix
+          reference pinned to that EXACT commit. A FloxEnv install entry "floxflake:<name>#<output>"
+          is rewritten to "<flakeRef>#<output>" before flox ever sees the manifest, so many FloxEnvs
+          share one pinned catalog while the controller stays generic (it only knows how to resolve
+          a flake from a Flux source — nothing about the workload). A new reconciled artifact (new
+          commit) re-derives status.flakeRef, keeping the flake in lock-step with the deployed
+          manifests (same commit, no drift).
         properties:
           apiVersion:
             description: |-

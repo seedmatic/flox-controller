@@ -110,6 +110,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// FloxFlake resolves a nix-flake catalog from a Flux source's reconciled artifact
+	// (cluster-scoped; on multi-node this runs redundantly per node-agent until split
+	// into a leader-elected cluster manager). It needs Flux's GitRepository CRD present.
+	if err := (&controller.FloxFlakeReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to set up controller", "controller", "FloxFlake")
+		os.Exit(1)
+	}
+
 	// Self-provision the controller's own base carrier once the cache is up. Best-effort:
 	// a failure (e.g. namespace not yet present) logs and is retried on restart, never
 	// crash-loops the manager.
