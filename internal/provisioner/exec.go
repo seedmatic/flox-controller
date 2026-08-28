@@ -15,11 +15,15 @@ import (
 //     flox `[include]` paths (../../<folder>/<name>) resolve within this root.
 //   - GcrootBase: the flox-runtime GC-root dir the NRI plugin reads
 //     (/nix/var/nix/gcroots/flox-runtime/env — floxEnvGcrootBase in the plugin).
-//   - CtrBin: the containerd CLI used to import carrier images (default "ctr").
+//   - CtrBin: the containerd CLI used to import carrier images (rke2 ships it at
+//     /var/lib/rancher/rke2/bin/ctr — not on the default PATH).
+//   - ContainerdAddress: the containerd socket ctr talks to (rke2 = /run/k3s/…); passed as
+//     ctr --address, so the import lands in the node's containerd, not ctr's default socket.
 type ExecProvisioner struct {
-	EnvRoot    string
-	GcrootBase string
-	CtrBin     string
+	EnvRoot           string
+	GcrootBase        string
+	CtrBin            string
+	ContainerdAddress string
 }
 
 func (p *ExecProvisioner) envDir(ref EnvRef) string {
@@ -132,7 +136,12 @@ func (p *ExecProvisioner) containerizeAndImport(ctx context.Context, dir string)
 	if ctr == "" {
 		ctr = "ctr"
 	}
-	imp := exec.CommandContext(ctx, ctr, "-n", "k8s.io", "images", "import", tar)
+	args := make([]string, 0, 6)
+	if p.ContainerdAddress != "" {
+		args = append(args, "--address", p.ContainerdAddress)
+	}
+	args = append(args, "-n", "k8s.io", "images", "import", tar)
+	imp := exec.CommandContext(ctx, ctr, args...)
 	imp.Stderr = os.Stderr
 	if err := imp.Run(); err != nil {
 		return fmt.Errorf("ctr images import: %w", err)

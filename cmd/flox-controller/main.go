@@ -30,13 +30,16 @@ func init() {
 }
 
 func main() {
-	var probeAddr, envRoot, gcrootBase, ctrBin, baseCarrierNamespace string
+	var probeAddr, envRoot, gcrootBase, ctrBin, containerdAddress, baseCarrierNamespace string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
 	flag.StringVar(&envRoot, "env-root", "/var/lib/flox-controller/envs",
 		"host dir where .flox env sources materialise (<env-root>/<folder>/<name>)")
 	flag.StringVar(&gcrootBase, "gcroot-base", "/nix/var/nix/gcroots/flox-runtime/env",
 		"flox-runtime GC-root dir the NRI plugin reads")
-	flag.StringVar(&ctrBin, "ctr-bin", "ctr", "containerd CLI used to import carrier images")
+	flag.StringVar(&ctrBin, "ctr-bin", "/var/lib/rancher/rke2/bin/ctr",
+		"containerd CLI used to import carrier images (rke2 ships it here, off the default PATH)")
+	flag.StringVar(&containerdAddress, "containerd-address", "/run/k3s/containerd/containerd.sock",
+		"containerd socket ctr imports into (rke2's k3s-containerd)")
 	// The controller owns its base carrier: it self-provisions it (see internal/carrier).
 	// Defaults to the controller's own namespace (always exists), else flox-system.
 	defaultCarrierNs := os.Getenv("POD_NAMESPACE")
@@ -69,9 +72,10 @@ func main() {
 		Client:   mgr.GetClient(),
 		NodeName: nodeName,
 		Provisioner: &provisioner.ExecProvisioner{
-			EnvRoot:    envRoot,
-			GcrootBase: gcrootBase,
-			CtrBin:     ctrBin,
+			EnvRoot:           envRoot,
+			GcrootBase:        gcrootBase,
+			CtrBin:            ctrBin,
+			ContainerdAddress: containerdAddress,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up controller", "controller", "FloxEnv")
