@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: floxflakes.flox.seedmatic.io
+  name: floxcatalogs.flox.seedmatic.io
 spec:
   group: flox.seedmatic.io
   names:
-    kind: FloxFlake
-    listKind: FloxFlakeList
-    plural: floxflakes
+    kind: FloxCatalog
+    listKind: FloxCatalogList
+    plural: floxcatalogs
     shortNames:
-    - ffl
-    singular: floxflake
+    - fcl
+    singular: floxcatalog
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -36,13 +36,13 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          FloxFlake binds a nix flake (a workload-package catalog) to a Flux source.
+          FloxCatalog binds a nix flake (a workload-package catalog) to a Flux source.
 
           Reconciliation: the controller reads the referenced GitRepository's status.artifact —
           the in-cluster tarball Flux's source-controller serves at the reconciled commit (Flux
           already fetched + authenticated it, so there is no external fetch and no token here) —
           and derives status.flakeRef = "tarball+<artifact-url>?dir=<spec.dir>", the concrete nix
-          reference pinned to that EXACT commit. A FloxEnv install entry "floxflake:<name>#<output>"
+          reference pinned to that EXACT commit. A FloxEnv install entry "floxcatalog:<name>#<output>"
           is rewritten to "<flakeRef>#<output>" before flox ever sees the manifest, so many FloxEnvs
           share one pinned catalog while the controller stays generic (it only knows how to resolve
           a flake from a Flux source — nothing about the workload). A new reconciled artifact (new
@@ -68,8 +68,8 @@ spec:
             type: object
           spec:
             description: |-
-              FloxFlakeSpec binds a nix flake (the workload-package catalog) to a Flux source.
-              A FloxEnv references it via `install.<id>.flake = "<floxflake-name>#<output>"`; the
+              FloxCatalogSpec binds a nix flake (the workload-package catalog) to a Flux source.
+              A FloxEnv references it via `install.<id>.flake = "floxcatalog:<name>#<output>"`; the
               controller rewrites that to the concrete nix ref derived from the source's artifact.
               This is the source/consumer split (à la Flux Kustomization -> GitRepository): the
               controller stays generic — it knows nothing about the workload, only how to resolve
@@ -96,7 +96,7 @@ spec:
                     type: string
                   namespace:
                     description: Namespace of the Flux source object. Defaults to
-                      the FloxFlake's namespace.
+                      the FloxCatalog's namespace.
                     type: string
                 required:
                 - name
@@ -105,7 +105,7 @@ spec:
             - sourceRef
             type: object
           status:
-            description: FloxFlakeStatus reports the concrete artifact the controller
+            description: FloxCatalogStatus reports the concrete artifact the controller
               has pinned the flake to.
             properties:
               artifactURL:
@@ -178,7 +178,7 @@ spec:
                 description: |-
                   FlakeRef is the concrete nix flake reference the controller derives for this
                   artifact (e.g. "tarball+http://…/<sha>.tar.gz?dir=runtime/flox"), reused by every
-                  FloxEnv that references this FloxFlake.
+                  FloxEnv that references this FloxCatalog.
                 type: string
               revision:
                 description: |-

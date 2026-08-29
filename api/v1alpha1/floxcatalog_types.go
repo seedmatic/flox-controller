@@ -18,18 +18,18 @@ type SourceReference struct {
 	// Name of the Flux source object.
 	Name string `json:"name"`
 
-	// Namespace of the Flux source object. Defaults to the FloxFlake's namespace.
+	// Namespace of the Flux source object. Defaults to the FloxCatalog's namespace.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// FloxFlakeSpec binds a nix flake (the workload-package catalog) to a Flux source.
-// A FloxEnv references it via `install.<id>.flake = "<floxflake-name>#<output>"`; the
+// FloxCatalogSpec binds a nix flake (the workload-package catalog) to a Flux source.
+// A FloxEnv references it via `install.<id>.flake = "floxcatalog:<name>#<output>"`; the
 // controller rewrites that to the concrete nix ref derived from the source's artifact.
 // This is the source/consumer split (à la Flux Kustomization -> GitRepository): the
 // controller stays generic — it knows nothing about the workload, only how to resolve
 // a flake output from a Flux source.
-type FloxFlakeSpec struct {
+type FloxCatalogSpec struct {
 	// SourceRef is the Flux source whose reconciled artifact carries the flake tree.
 	SourceRef SourceReference `json:"sourceRef"`
 
@@ -39,8 +39,8 @@ type FloxFlakeSpec struct {
 	Dir string `json:"dir,omitempty"`
 }
 
-// FloxFlakeStatus reports the concrete artifact the controller has pinned the flake to.
-type FloxFlakeStatus struct {
+// FloxCatalogStatus reports the concrete artifact the controller has pinned the flake to.
+type FloxCatalogStatus struct {
 	// Revision is the source's reconciled revision the flake is pinned to
 	// (e.g. "manifests/bioskop-mgmt@sha1:42a4846…").
 	// +optional
@@ -53,7 +53,7 @@ type FloxFlakeStatus struct {
 
 	// FlakeRef is the concrete nix flake reference the controller derives for this
 	// artifact (e.g. "tarball+http://…/<sha>.tar.gz?dir=runtime/flox"), reused by every
-	// FloxEnv that references this FloxFlake.
+	// FloxEnv that references this FloxCatalog.
 	// +optional
 	FlakeRef string `json:"flakeRef,omitempty"`
 
@@ -66,42 +66,42 @@ type FloxFlakeStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,shortName=ffl
+// +kubebuilder:resource:scope=Namespaced,shortName=fcl
 // +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.sourceRef.name`
 // +kubebuilder:printcolumn:name="Dir",type=string,JSONPath=`.spec.dir`
 // +kubebuilder:printcolumn:name="Revision",type=string,JSONPath=`.status.revision`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// FloxFlake binds a nix flake (a workload-package catalog) to a Flux source.
+// FloxCatalog binds a nix flake (a workload-package catalog) to a Flux source.
 //
 // Reconciliation: the controller reads the referenced GitRepository's status.artifact —
 // the in-cluster tarball Flux's source-controller serves at the reconciled commit (Flux
 // already fetched + authenticated it, so there is no external fetch and no token here) —
 // and derives status.flakeRef = "tarball+<artifact-url>?dir=<spec.dir>", the concrete nix
-// reference pinned to that EXACT commit. A FloxEnv install entry "floxflake:<name>#<output>"
+// reference pinned to that EXACT commit. A FloxEnv install entry "floxcatalog:<name>#<output>"
 // is rewritten to "<flakeRef>#<output>" before flox ever sees the manifest, so many FloxEnvs
 // share one pinned catalog while the controller stays generic (it only knows how to resolve
 // a flake from a Flux source — nothing about the workload). A new reconciled artifact (new
 // commit) re-derives status.flakeRef, keeping the flake in lock-step with the deployed
 // manifests (same commit, no drift).
-type FloxFlake struct {
+type FloxCatalog struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   FloxFlakeSpec   `json:"spec,omitempty"`
-	Status FloxFlakeStatus `json:"status,omitempty"`
+	Spec   FloxCatalogSpec   `json:"spec,omitempty"`
+	Status FloxCatalogStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// FloxFlakeList contains a list of FloxFlake.
-type FloxFlakeList struct {
+// FloxCatalogList contains a list of FloxCatalog.
+type FloxCatalogList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []FloxFlake `json:"items"`
+	Items           []FloxCatalog `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&FloxFlake{}, &FloxFlakeList{})
+	SchemeBuilder.Register(&FloxCatalog{}, &FloxCatalogList{})
 }

@@ -38,7 +38,7 @@ type FloxEnvReconciler struct {
 
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxflakes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs,verbs=get;list;watch
 
 // Reconcile realises the desired FloxEnv onto this node's host /nix/store.
 func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -128,7 +128,7 @@ func (r *FloxEnvReconciler) fail(ctx context.Context, env *floxv1alpha1.FloxEnv,
 	return ctrl.Result{}, cause
 }
 
-// waitForFlake records that a referenced FloxFlake has not resolved its artifact yet and
+// waitForFlake records that a referenced FloxCatalog has not resolved its artifact yet and
 // requeues — no error, so no exponential-backoff spam for an expected transient wait.
 func (r *FloxEnvReconciler) waitForFlake(ctx context.Context, env *floxv1alpha1.FloxEnv) (ctrl.Result, error) {
 	base := env.DeepCopy()
@@ -136,7 +136,7 @@ func (r *FloxEnvReconciler) waitForFlake(ctx context.Context, env *floxv1alpha1.
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
 		Reason:             "WaitingForFlake",
-		Message:            "referenced FloxFlake has not resolved an artifact yet",
+		Message:            "referenced FloxCatalog has not resolved an artifact yet",
 		ObservedGeneration: env.Generation,
 	})
 	_ = r.Status().Patch(ctx, env, client.MergeFrom(base))
@@ -144,7 +144,7 @@ func (r *FloxEnvReconciler) waitForFlake(ctx context.Context, env *floxv1alpha1.
 }
 
 // parseManifest decodes spec.manifest (stored as JSON by the API server) into a mutable map
-// so the controller can resolve floxflake: install refs before serialising to TOML.
+// so the controller can resolve floxcatalog: install refs before serialising to TOML.
 func parseManifest(raw *runtime.RawExtension) (map[string]any, error) {
 	if raw == nil || len(raw.Raw) == 0 {
 		return map[string]any{}, nil
@@ -174,19 +174,19 @@ func manifestToTOML(m map[string]any) ([]byte, error) {
 	return out, nil
 }
 
-const floxFlakeScheme = "floxflake:"
+const floxCatalogScheme = "floxcatalog:"
 
-// floxFlakeRef is a parsed "floxflake:[<namespace>/]<name>#<output>" install reference — a
-// controller PSEUDO-scheme, not a nix scheme. It names a FloxFlake whose resolved
+// floxCatalogRef is a parsed "floxcatalog:[<namespace>/]<name>#<output>" install reference — a
+// controller PSEUDO-scheme, not a nix scheme. It names a FloxCatalog whose resolved
 // status.flakeRef the controller substitutes in before flox ever sees the manifest.
-type floxFlakeRef struct {
+type floxCatalogRef struct {
 	namespace string
 	name      string
 	output    string
 }
 
-func parseFloxFlakeRef(s string) (floxFlakeRef, error) {
-	body := strings.TrimPrefix(s, floxFlakeScheme)
+func parseFloxCatalogRef(s string) (floxCatalogRef, error) {
+	body := strings.TrimPrefix(s, floxCatalogScheme)
 	var output string
 	if i := strings.Index(body, "#"); i >= 0 {
 		output, body = body[i+1:], body[:i]
@@ -198,14 +198,14 @@ func parseFloxFlakeRef(s string) (floxFlakeRef, error) {
 		name = body
 	}
 	if name == "" {
-		return floxFlakeRef{}, fmt.Errorf("invalid ref %q (want floxflake:[<ns>/]<name>#<output>)", s)
+		return floxCatalogRef{}, fmt.Errorf("invalid ref %q (want floxcatalog:[<ns>/]<name>#<output>)", s)
 	}
-	return floxFlakeRef{namespace: ns, name: name, output: output}, nil
+	return floxCatalogRef{namespace: ns, name: name, output: output}, nil
 }
 
-// resolveFlakeInstalls rewrites any install.<id>.flake using the "floxflake:" pseudo-scheme
-// to the concrete nix ref from the referenced FloxFlake's status.flakeRef (+ the requested
-// output). Returns waiting=true if a referenced FloxFlake exists but has not resolved an
+// resolveFlakeInstalls rewrites any install.<id>.flake using the "floxcatalog:" pseudo-scheme
+// to the concrete nix ref from the referenced FloxCatalog's status.flakeRef (+ the requested
+// output). Returns waiting=true if a referenced FloxCatalog exists but has not resolved an
 // artifact yet, so the caller requeues instead of realising a half-resolved manifest.
 func (r *FloxEnvReconciler) resolveFlakeInstalls(ctx context.Context, envNS string, m map[string]any) (bool, error) {
 	install, ok := m["install"].(map[string]any)
@@ -218,10 +218,10 @@ func (r *FloxEnvReconciler) resolveFlakeInstalls(ctx context.Context, envNS stri
 			continue
 		}
 		raw, ok := entry["flake"].(string)
-		if !ok || !strings.HasPrefix(raw, floxFlakeScheme) {
+		if !ok || !strings.HasPrefix(raw, floxCatalogScheme) {
 			continue
 		}
-		ref, err := parseFloxFlakeRef(raw)
+		ref, err := parseFloxCatalogRef(raw)
 		if err != nil {
 			return false, fmt.Errorf("install.%s.flake: %w", id, err)
 		}
@@ -229,15 +229,15 @@ func (r *FloxEnvReconciler) resolveFlakeInstalls(ctx context.Context, envNS stri
 		if ns == "" {
 			ns = envNS
 		}
-		var flake floxv1alpha1.FloxFlake
+		var flake floxv1alpha1.FloxCatalog
 		if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.name}, &flake); err != nil {
 			if apierrors.IsNotFound(err) {
-				return false, fmt.Errorf("install.%s: FloxFlake %s/%s not found", id, ns, ref.name)
+				return false, fmt.Errorf("install.%s: FloxCatalog %s/%s not found", id, ns, ref.name)
 			}
 			return false, err
 		}
 		if flake.Status.FlakeRef == "" {
-			return true, nil // referenced FloxFlake has not resolved an artifact yet
+			return true, nil // referenced FloxCatalog has not resolved an artifact yet
 		}
 		concrete := flake.Status.FlakeRef
 		if ref.output != "" {

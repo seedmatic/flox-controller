@@ -23,7 +23,7 @@ import (
 //     run in the HOST's namespaces (needed inside the DaemonSet, where host tools aren't
 //     reachable from the container). Empty when the controller runs directly on the node (the
 //     nix-run) — tools are found natively. main.go auto-detects which (mount-namespace vs host
-//     PID 1). --net (host network) matters for flox: nix fetches the FloxFlake catalog from the
+//     PID 1). --net (host network) matters for flox: nix fetches the FloxCatalog's flake from the
 //     Flux artifact's in-cluster ClusterIP, and host-originated traffic reaches ClusterIPs
 //     (Cilium) while BYPASSING the pod NetworkPolicies that otherwise deny a non-flux-system pod
 //     the source-controller artifact port (the pod netns times out).

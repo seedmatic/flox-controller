@@ -117,13 +117,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// FloxFlake resolves a nix-flake catalog from a Flux source's reconciled artifact
+	// FloxCatalog resolves a nix-flake catalog from a Flux source's reconciled artifact
 	// (cluster-scoped; on multi-node this runs redundantly per node-agent until split
 	// into a leader-elected cluster manager). It needs Flux's GitRepository CRD present.
-	if err := (&controller.FloxFlakeReconciler{
+	if err := (&controller.FloxCatalogReconciler{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to set up controller", "controller", "FloxFlake")
+		setupLog.Error(err, "unable to set up controller", "controller", "FloxCatalog")
 		os.Exit(1)
 	}
 

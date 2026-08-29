@@ -115,21 +115,21 @@ func TestReconcile_RealizeFailureSetsNotReady(t *testing.T) {
 	}
 }
 
-func TestReconcile_ResolvesFloxFlakeRefAndCapturesLock(t *testing.T) {
-	flake := &floxv1alpha1.FloxFlake{
+func TestReconcile_ResolvesFloxCatalogRefAndCapturesLock(t *testing.T) {
+	flake := &floxv1alpha1.FloxCatalog{
 		ObjectMeta: metav1.ObjectMeta{Name: "catalogue", Namespace: "networking"},
-		Status: floxv1alpha1.FloxFlakeStatus{
+		Status: floxv1alpha1.FloxCatalogStatus{
 			FlakeRef: "tarball+http://sc.flux/gitrepository/flux-system/rke2lab/deadbeef.tar.gz?dir=runtime/flox",
 		},
 	}
 	env := &floxv1alpha1.FloxEnv{
 		ObjectMeta: metav1.ObjectMeta{Name: "kdns", Namespace: "networking"},
 		Spec: floxv1alpha1.FloxEnvSpec{
-			Manifest: &runtime.RawExtension{Raw: []byte(`{"install":{"kdns":{"flake":"floxflake:catalogue#kdns"}}}`)},
+			Manifest: &runtime.RawExtension{Raw: []byte(`{"install":{"kdns":{"flake":"floxcatalog:catalogue#kdns"}}}`)},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(flake, env).
-		WithStatusSubresource(&floxv1alpha1.FloxEnv{}, &floxv1alpha1.FloxFlake{}).Build()
+		WithStatusSubresource(&floxv1alpha1.FloxEnv{}, &floxv1alpha1.FloxCatalog{}).Build()
 
 	fp := &fakeProvisioner{result: provisioner.RealizeResult{StorePath: "/nix/store/x", Lock: "locked!"}}
 	r := &FloxEnvReconciler{Client: c, NodeName: "node-a", Provisioner: fp}
@@ -138,12 +138,12 @@ func TestReconcile_ResolvesFloxFlakeRefAndCapturesLock(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	// the floxflake: pseudo-scheme was rewritten to the concrete tarball ref + output.
+	// the floxcatalog: pseudo-scheme was rewritten to the concrete tarball ref + output.
 	toml := string(fp.got.ManifestTOML)
 	if !strings.Contains(toml, "deadbeef.tar.gz?dir=runtime/flox#kdns") {
 		t.Errorf("flake ref not resolved in TOML: %q", toml)
 	}
-	if strings.Contains(toml, "floxflake:") {
+	if strings.Contains(toml, "floxcatalog:") {
 		t.Errorf("pseudo-scheme leaked to flox: %q", toml)
 	}
 
@@ -158,13 +158,13 @@ func TestReconcile_ResolvesFloxFlakeRefAndCapturesLock(t *testing.T) {
 }
 
 func TestReconcile_WaitsForUnresolvedFlake(t *testing.T) {
-	flake := &floxv1alpha1.FloxFlake{ // no status.flakeRef → artifact not resolved yet
+	flake := &floxv1alpha1.FloxCatalog{ // no status.flakeRef → artifact not resolved yet
 		ObjectMeta: metav1.ObjectMeta{Name: "catalogue", Namespace: "networking"},
 	}
 	env := &floxv1alpha1.FloxEnv{
 		ObjectMeta: metav1.ObjectMeta{Name: "kdns", Namespace: "networking"},
 		Spec: floxv1alpha1.FloxEnvSpec{
-			Manifest: &runtime.RawExtension{Raw: []byte(`{"install":{"kdns":{"flake":"floxflake:catalogue#kdns"}}}`)},
+			Manifest: &runtime.RawExtension{Raw: []byte(`{"install":{"kdns":{"flake":"floxcatalog:catalogue#kdns"}}}`)},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(flake, env).
@@ -178,7 +178,7 @@ func TestReconcile_WaitsForUnresolvedFlake(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if res.RequeueAfter == 0 {
-		t.Error("expected requeue while the FloxFlake is unresolved")
+		t.Error("expected requeue while the FloxCatalog is unresolved")
 	}
 	if fp.got.ManifestTOML != nil {
 		t.Errorf("provisioner must not run while waiting: %+v", fp.got)

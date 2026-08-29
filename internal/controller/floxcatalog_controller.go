@@ -29,24 +29,24 @@ var gitRepositoryGVK = schema.GroupVersionKind{
 	Kind:    "GitRepository",
 }
 
-// FloxFlakeReconciler resolves a FloxFlake to a concrete nix flake reference derived from
+// FloxCatalogReconciler resolves a FloxCatalog to a concrete nix flake reference derived from
 // the referenced Flux source's reconciled artifact — an in-cluster tarball at the EXACT
 // reconciled commit (no external fetch, no token: Flux already fetched it). This is
 // cluster-scoped, node-independent work; on multi-node it may run redundantly on each
 // node-agent (idempotent) until split into a leader-elected cluster manager.
-type FloxFlakeReconciler struct {
+type FloxCatalogReconciler struct {
 	client.Client
 }
 
-// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxflakes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxflakes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get;list;watch
 
 // Reconcile derives status.flakeRef from the referenced GitRepository's artifact.
-func (r *FloxFlakeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *FloxCatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 
-	var flake floxv1alpha1.FloxFlake
+	var flake floxv1alpha1.FloxCatalog
 	if err := r.Get(ctx, req.NamespacedName, &flake); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -96,11 +96,11 @@ func (r *FloxFlakeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Status().Patch(ctx, &flake, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
-	l.Info("resolved FloxFlake", "flake", req.NamespacedName, "revision", revision, "flakeRef", flakeRef)
+	l.Info("resolved FloxCatalog", "flake", req.NamespacedName, "revision", revision, "flakeRef", flakeRef)
 	return ctrl.Result{}, nil
 }
 
-func (r *FloxFlakeReconciler) notReady(ctx context.Context, flake *floxv1alpha1.FloxFlake, reason string, cause error) (ctrl.Result, error) {
+func (r *FloxCatalogReconciler) notReady(ctx context.Context, flake *floxv1alpha1.FloxCatalog, reason string, cause error) (ctrl.Result, error) {
 	base := flake.DeepCopy()
 	meta.SetStatusCondition(&flake.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -143,10 +143,10 @@ func nodeReachableURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// flakesForSource enqueues every FloxFlake whose sourceRef names the changed GitRepository,
+// catalogsForSource enqueues every FloxCatalog whose sourceRef names the changed GitRepository,
 // so a new reconciled artifact (new commit) re-derives the flake ref.
-func (r *FloxFlakeReconciler) flakesForSource(ctx context.Context, obj client.Object) []reconcile.Request {
-	var list floxv1alpha1.FloxFlakeList
+func (r *FloxCatalogReconciler) catalogsForSource(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list floxv1alpha1.FloxCatalogList
 	if err := r.List(ctx, &list); err != nil {
 		return nil
 	}
@@ -166,13 +166,13 @@ func (r *FloxFlakeReconciler) flakesForSource(ctx context.Context, obj client.Ob
 	return reqs
 }
 
-// SetupWithManager watches FloxFlake + the referenced GitRepository (unstructured), so a
+// SetupWithManager watches FloxCatalog + the referenced GitRepository (unstructured), so a
 // new reconciled artifact re-resolves the flake ref.
-func (r *FloxFlakeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *FloxCatalogReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	src := &unstructured.Unstructured{}
 	src.SetGroupVersionKind(gitRepositoryGVK)
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&floxv1alpha1.FloxFlake{}).
-		Watches(src, handler.EnqueueRequestsFromMapFunc(r.flakesForSource)).
+		For(&floxv1alpha1.FloxCatalog{}).
+		Watches(src, handler.EnqueueRequestsFromMapFunc(r.catalogsForSource)).
 		Complete(r)
 }
