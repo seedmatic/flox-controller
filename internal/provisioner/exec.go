@@ -54,6 +54,14 @@ func (p *ExecProvisioner) gcrootPath(ref EnvRef) string {
 	return filepath.Join(p.GcrootBase, ref.Folder, ref.Name)
 }
 
+// activationGcrootPath is the SEPARATE gcroot tree that keeps an env's activation closure
+// alive for the container cache-hit — a sibling of GcrootBase (…/flox-runtime/env →
+// …/flox-runtime/activation), mirroring the baked model. The NRI plugin never reads it; only
+// the env-subtree gcroot (gcrootPath) is plugin-facing.
+func (p *ExecProvisioner) activationGcrootPath(ref EnvRef) string {
+	return filepath.Join(filepath.Dir(p.GcrootBase), "activation", ref.Folder, ref.Name)
+}
+
 // Realize materialises the env source, builds it on the node, writes the GC-root,
 // and (image) containerizes + imports.
 func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (RealizeResult, error) {
@@ -80,14 +88,32 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 		}
 	}
 
-	// "run" = the lean prod activation closure. A future increment emits BOTH gcroots
-	// (run + dev) per env so a pod can pick the interactive dev closure; for now the
-	// workload gcroot points at the run closure.
-	storePath, err := p.buildEnv(ctx, dir, "run")
+	// Realise the activation closure the injected container needs. The pod command is a
+	// bare `flox activate` (no --mode) — which flox runs in DEV mode (authoritative: the
+	// baked nixos/flox-runtime.nix) — so the DEV closure is what the container cache-hits
+	// against. Realise it here, where the controller has the memory headroom the pod's
+	// cgroup lacks (the whole point of node-side realisation). "run" has no consumer.
+	activation, err := p.buildEnv(ctx, dir, "dev")
 	if err != nil {
 		return RealizeResult{}, err
 	}
-	if err := p.writeGcroot(req.Ref, storePath); err != nil {
+
+	// TWO artifacts, mirroring the baked model (nixos/flox-runtime.nix):
+	//   1. the env SUBTREE — a store path exposing env/{manifest.toml,manifest.lock} — is
+	//      what the NRI plugin readlinks + stats and the env-link hook symlinks; gcroot IT
+	//      at the plugin's well-known <GcrootBase>/<folder>/<name> path. NOT the activation
+	//      closure (whose manifest.lock sits at its ROOT, no env/ subtree — the CreateContainer
+	//      failure that blocked kdns).
+	//   2. the activation closure — kept GC-protected under a SEPARATE gcroot tree so the
+	//      container's `flox activate` is a cache-hit, never a from-scratch (OOM-prone) build.
+	subtree, err := p.addEnvSubtree(ctx, req.Ref, floxEnv)
+	if err != nil {
+		return RealizeResult{}, err
+	}
+	if err := p.writeGcroot(p.gcrootPath(req.Ref), subtree); err != nil {
+		return RealizeResult{}, err
+	}
+	if err := p.writeGcroot(p.activationGcrootPath(req.Ref), activation); err != nil {
 		return RealizeResult{}, err
 	}
 	if req.Consumption == "image" {
@@ -99,11 +125,48 @@ func (p *ExecProvisioner) Realize(ctx context.Context, req RealizeRequest) (Real
 	// activate produced) so the reconciler can pin it into status.lock.
 	lock, _ := os.ReadFile(filepath.Join(floxEnv, "manifest.lock"))
 	return RealizeResult{
-		StorePath:  storePath,
+		StorePath:  subtree,
 		EnvPath:    dir,
 		GcrootPath: p.gcrootPath(req.Ref),
 		Lock:       string(lock),
 	}, nil
+}
+
+// addEnvSubtree stages env/{manifest.toml,manifest.lock} into a clean dir under the env dir
+// (on the shared hostPath, so the node's nix sees it through nsenter) and `nix-store --add`s
+// it, yielding an immutable /nix/store/<hash>-flox-env-<folder>-<name>-subtree whose env/
+// subdir is EXACTLY what the NRI plugin stats (resolveFloxEnvironment) and the env-link hook
+// symlinks (.flox/env -> <store>/env). The store-path name is deterministic (basename of the
+// staged dir), mirroring the baked mkEnvSubtree. `nix-store --add` (stable CLI) avoids any
+// dependency on the nix-command experimental feature being enabled on the node.
+func (p *ExecProvisioner) addEnvSubtree(ctx context.Context, ref EnvRef, floxEnv string) (string, error) {
+	name := fmt.Sprintf("flox-env-%s-%s-subtree", ref.Folder, ref.Name)
+	staging := filepath.Join(p.envDir(ref), name)
+	stagingEnv := filepath.Join(staging, "env")
+	if err := os.RemoveAll(staging); err != nil {
+		return "", fmt.Errorf("clean subtree staging %s: %w", staging, err)
+	}
+	defer os.RemoveAll(staging)
+	if err := os.MkdirAll(stagingEnv, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir subtree staging %s: %w", stagingEnv, err)
+	}
+	for _, f := range []string{"manifest.toml", "manifest.lock"} {
+		b, err := os.ReadFile(filepath.Join(floxEnv, f))
+		if err != nil {
+			return "", fmt.Errorf("read %s for subtree: %w", f, err)
+		}
+		if err := os.WriteFile(filepath.Join(stagingEnv, f), b, 0o644); err != nil {
+			return "", fmt.Errorf("write subtree %s: %w", f, err)
+		}
+	}
+	cmd := p.command(ctx, "nix-store", "--add", staging)
+	cmd.Env = floxCommandEnv()
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("nix-store --add %s: %w", staging, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // floxCommandEnv is the environment for flox subprocesses. The key one is
@@ -165,10 +228,9 @@ func (p *ExecProvisioner) buildEnv(ctx context.Context, dir, mode string) (strin
 	return "", fmt.Errorf("no /nix/store env path under %s", runDir)
 }
 
-// writeGcroot atomically points <GcrootBase>/<folder>/<name> at the store path —
-// the exact path the NRI plugin readlinks to resolve the env.
-func (p *ExecProvisioner) writeGcroot(ref EnvRef, storePath string) error {
-	gc := p.gcrootPath(ref)
+// writeGcroot atomically points the given gcroot path at the store path. For the plugin-facing
+// env gcroot (gcrootPath) that's the subtree; for the activation gcroot it's the closure.
+func (p *ExecProvisioner) writeGcroot(gc, storePath string) error {
 	if err := os.MkdirAll(filepath.Dir(gc), 0o755); err != nil {
 		return fmt.Errorf("mkdir gcroot dir: %w", err)
 	}
