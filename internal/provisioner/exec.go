@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/seedmatic/flox-controller/internal/floxenv"
 )
 
 // ExecProvisioner realises envs by shelling to the node's flox/nix/containerd.
@@ -169,19 +171,11 @@ func (p *ExecProvisioner) addEnvSubtree(ctx context.Context, ref EnvRef, floxEnv
 	return strings.TrimSpace(string(out)), nil
 }
 
-// floxCommandEnv is the environment for flox subprocesses. The key one is
-// _FLOX_TESTING_DISABLE_BG_SIDE_EFFECTS=true: without it every `flox activate` spawns a
-// DETACHED check-for-upgrades that runs `nix eval --refresh` — it races the .flox lock
-// between rapid reconciles (intermittent `flox activate: exit status 1`) and can OOM. It is
-// an internal flox knob (check_for_upgrades.rs), the only mechanism today (mirrors the
-// flox-nri-plugin). The rest quiet metrics/telemetry (as the flox-runtime ConfigMap does).
+// floxCommandEnv is the environment for flox subprocesses: the process env (which carries
+// FLOX_FLOXHUB_TOKEN when the DaemonSet wires it from the replicated Secret) plus the canonical
+// flox behavioural knobs — the single source in floxenv, shared with the pod-injecting webhook.
 func floxCommandEnv() []string {
-	return append(os.Environ(),
-		"_FLOX_TESTING_DISABLE_BG_SIDE_EFFECTS=true",
-		"FLOX_DISABLE_METRICS=true",
-		"FLOX_NO_TELEMETRY=1",
-		"FLOX_NONINTERACTIVE=1",
-	)
+	return append(os.Environ(), floxenv.Environ()...)
 }
 
 // buildEnv activates the env in the given mode (which locks-if-needed + realises its
