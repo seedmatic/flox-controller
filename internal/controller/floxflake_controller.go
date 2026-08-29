@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
+	neturl "net/url"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,8 +70,14 @@ func (r *FloxFlakeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	revision, _, _ := unstructured.NestedString(src.Object, "status", "artifact", "revision")
 
 	// The Flux artifact is an in-cluster tarball at the reconciled commit → a nix tarball
-	// flake ref; dir scopes the flake root within the source tree.
-	flakeRef := "tarball+" + url
+	// flake ref; dir scopes the flake root within the source tree. nix fetches it ON THE NODE
+	// (via nsenter), whose netns routes ClusterIPs (Cilium) but has NO cluster DNS — so rewrite
+	// the artifact host to its ClusterIP, resolved here IN-POD where cluster DNS works.
+	reachableURL, err := nodeReachableURL(url)
+	if err != nil {
+		return r.notReady(ctx, &flake, "ArtifactURLUnresolvable", err)
+	}
+	flakeRef := "tarball+" + reachableURL
 	if flake.Spec.Dir != "" {
 		flakeRef += "?dir=" + flake.Spec.Dir
 	}
@@ -103,6 +111,36 @@ func (r *FloxFlakeReconciler) notReady(ctx context.Context, flake *floxv1alpha1.
 	})
 	_ = r.Status().Patch(ctx, flake, client.MergeFrom(base))
 	return ctrl.Result{}, cause
+}
+
+// nodeReachableURL rewrites an in-cluster artifact URL (Flux serves the tarball at
+// source-controller.<ns>.svc.cluster.local) to use the resolved ClusterIP in place of the DNS
+// name. The controller resolves it here IN-POD (cluster DNS works); the flake is then fetched by
+// nix ON THE NODE via nsenter, whose netns routes ClusterIPs (Cilium) but carries no cluster DNS.
+// source-controller serves artifacts by path, not vhost, so the IP Host header is fine. A URL
+// already using an IP is returned unchanged.
+func nodeReachableURL(raw string) (string, error) {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	host := u.Hostname()
+	if net.ParseIP(host) != nil {
+		return raw, nil
+	}
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return "", fmt.Errorf("resolve artifact host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("resolve artifact host %q: no addresses", host)
+	}
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort(ips[0], port)
+	} else {
+		u.Host = ips[0]
+	}
+	return u.String(), nil
 }
 
 // flakesForSource enqueues every FloxFlake whose sourceRef names the changed GitRepository,
