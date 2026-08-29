@@ -19,10 +19,14 @@ import (
 //     /var/lib/rancher/rke2/bin/ctr — not on the default PATH).
 //   - ContainerdAddress: the containerd socket ctr talks to (rke2 = /run/k3s/…); passed as
 //     ctr --address, so the import lands in the node's containerd, not ctr's default socket.
-//   - Nsenter: when non-empty, flox/ctr are exec'd through `nsenter -t 1 -m -p --` so they run
-//     in the HOST's namespaces (needed inside the DaemonSet, where host tools aren't reachable
-//     from the container). Empty when the controller runs directly on the node (the nix-run) —
-//     tools are found natively. main.go auto-detects which (mount-namespace vs host PID 1).
+//   - Nsenter: when non-empty, flox/ctr are exec'd through `nsenter -t 1 -m -p -n --` so they
+//     run in the HOST's namespaces (needed inside the DaemonSet, where host tools aren't
+//     reachable from the container). Empty when the controller runs directly on the node (the
+//     nix-run) — tools are found natively. main.go auto-detects which (mount-namespace vs host
+//     PID 1). --net (host network) matters for flox: nix fetches the FloxFlake catalog from the
+//     Flux artifact's in-cluster ClusterIP, and host-originated traffic reaches ClusterIPs
+//     (Cilium) while BYPASSING the pod NetworkPolicies that otherwise deny a non-flux-system pod
+//     the source-controller artifact port (the pod netns times out).
 type ExecProvisioner struct {
 	EnvRoot           string
 	GcrootBase        string
@@ -36,7 +40,7 @@ type ExecProvisioner struct {
 // The caller's env (see floxCommandEnv) is preserved either way — nsenter does not reset it.
 func (p *ExecProvisioner) command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	if p.Nsenter != "" {
-		full := append([]string{"--target", "1", "--mount", "--pid", "--", name}, args...)
+		full := append([]string{"--target", "1", "--mount", "--pid", "--net", "--", name}, args...)
 		return exec.CommandContext(ctx, p.Nsenter, full...)
 	}
 	return exec.CommandContext(ctx, name, args...)
