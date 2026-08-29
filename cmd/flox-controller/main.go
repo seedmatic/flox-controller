@@ -65,11 +65,15 @@ func main() {
 	flag.StringVar(&baseCarrierNamespace, "base-carrier-namespace", defaultCarrierNs,
 		"namespace for the controller's embedded base carrier FloxEnv")
 	var enableWebhook bool
-	var waitImage string
+	var waitImage, tokenSecretName, tokenSecretKey string
 	flag.BoolVar(&enableWebhook, "enable-webhook", false,
-		"run the pod flox-wait mutating webhook (cluster-manager mode; needs TLS certs) — off in the node-agent DaemonSet")
+		"serve the pod-mutating webhook (needs TLS certs at the webhook cert dir) — a Service fronts the DaemonSet pods; the mutation is stateless so any pod serves")
 	flag.StringVar(&waitImage, "flox-wait-image", "busybox:stable",
 		"image for the injected flox-wait init container (needs /bin/sh)")
+	flag.StringVar(&tokenSecretName, "token-secret-name", "",
+		"name of the (replicated) Secret carrying the FloxHub token; empty disables token injection")
+	flag.StringVar(&tokenSecretKey, "token-secret-key", "token",
+		"key within the token secret holding the FloxHub token value")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -118,8 +122,9 @@ func main() {
 	}
 
 	// FloxCatalog resolves a nix-flake catalog from a Flux source's reconciled artifact
-	// (cluster-scoped; on multi-node this runs redundantly per node-agent until split
-	// into a leader-elected cluster manager). It needs Flux's GitRepository CRD present.
+	// (cluster-scoped; on multi-node it runs redundantly on each DaemonSet pod — accepted,
+	// the resolution is idempotent; leader election is a future optimisation, not required).
+	// It needs Flux's GitRepository CRD present.
 	if err := (&controller.FloxCatalogReconciler{
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
@@ -127,14 +132,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The pod flox-wait mutating webhook runs only in the cluster-manager Deployment
-	// (--enable-webhook): serving it needs TLS certs the node-agent DaemonSet has no
-	// reason to carry. It injects the node-aware race barrier into flox-annotated pods.
+	// The pod-mutating webhook (--enable-webhook) injects the node-aware flox-wait barrier +
+	// the flox env/token into flox-annotated pods. It runs in every DaemonSet pod behind a
+	// Service (stateless mutation → any pod serves); serving needs the TLS cert mounted at the
+	// webhook cert dir. The FloxHub token is injected valueFrom the replicated token Secret.
 	if enableWebhook {
 		if err := (&floxwebhook.PodFloxWaitInjector{
-			GcrootBase:     gcrootBase,
-			WaitImage:      waitImage,
-			TimeoutSeconds: 120,
+			GcrootBase:      gcrootBase,
+			WaitImage:       waitImage,
+			TimeoutSeconds:  120,
+			TokenSecretName: tokenSecretName,
+			TokenSecretKey:  tokenSecretKey,
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up webhook", "webhook", "PodFloxWait")
 			os.Exit(1)
