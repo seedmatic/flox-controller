@@ -13,6 +13,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/seedmatic/flox-controller/internal/floxenv"
 )
 
 const (
@@ -42,6 +44,11 @@ type PodFloxWaitInjector struct {
 	// TimeoutSeconds bounds the wait; on expiry the init container fails so the stall is
 	// visible (CrashLoopBackOff) rather than hanging forever.
 	TimeoutSeconds int
+	// TokenSecretName/TokenSecretKey locate the FloxHub token (a replicated Secret present
+	// in the pod's namespace). When set, FLOX_FLOXHUB_TOKEN is injected valueFrom that key
+	// into every flox-annotated container. Empty disables token injection (the knobs still go in).
+	TokenSecretName string
+	TokenSecretKey  string
 }
 
 // Default injects the flox-wait init container. Idempotent: a pod that already carries it
@@ -56,6 +63,12 @@ func (i *PodFloxWaitInjector) Default(_ context.Context, obj runtime.Object) err
 	if len(gcroots) == 0 {
 		return nil // pod opted into no flox env
 	}
+
+	// Inject the canonical flox settings (+ the FloxHub token) into every flox-annotated
+	// container — the single vector, subsuming the NRI plugin's AddEnv and the flox-runtime
+	// ConfigMap envFrom. Idempotent (upsert): a var already set on the container wins.
+	i.injectFloxEnv(pod)
+
 	for _, c := range pod.Spec.InitContainers {
 		if c.Name == floxWaitContainerName {
 			return nil // already injected
@@ -92,6 +105,50 @@ func (i *PodFloxWaitInjector) Default(_ context.Context, obj runtime.Object) err
 		})
 	}
 	return nil
+}
+
+// injectFloxEnv upserts the canonical flox settings (floxenv) — and, when a token secret is
+// configured, FLOX_FLOXHUB_TOKEN valueFrom that Secret — onto every container that opted into a
+// flox env via a per-container flox.dev/environment.<container> annotation. Init containers (incl.
+// the flox-wait busybox) are untouched: they are not flox-activated.
+func (i *PodFloxWaitInjector) injectFloxEnv(pod *corev1.Pod) {
+	annotated := map[string]struct{}{}
+	for k, v := range pod.Annotations {
+		if strings.HasPrefix(k, floxEnvAnnotationPrefix) && v != "" {
+			annotated[strings.TrimPrefix(k, floxEnvAnnotationPrefix)] = struct{}{}
+		}
+	}
+	for idx := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[idx]
+		if _, ok := annotated[c.Name]; !ok {
+			continue
+		}
+		for _, s := range floxenv.Settings() {
+			upsertEnv(c, corev1.EnvVar{Name: s.Name, Value: s.Value})
+		}
+		if i.TokenSecretName != "" && i.TokenSecretKey != "" {
+			upsertEnv(c, corev1.EnvVar{
+				Name: "FLOX_FLOXHUB_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: i.TokenSecretName},
+						Key:                  i.TokenSecretKey,
+					},
+				},
+			})
+		}
+	}
+}
+
+// upsertEnv sets env var v on the container unless a var of that name is already present — an
+// explicit value on the pod spec wins over the injected default.
+func upsertEnv(c *corev1.Container, v corev1.EnvVar) {
+	for _, existing := range c.Env {
+		if existing.Name == v.Name {
+			return
+		}
+	}
+	c.Env = append(c.Env, v)
 }
 
 // gcrootsFromAnnotations resolves every flox.dev/environment.<c> annotation to the GC-root

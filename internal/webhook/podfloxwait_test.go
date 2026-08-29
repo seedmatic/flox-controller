@@ -38,6 +38,53 @@ func TestInject_AddsWaitForAnnotatedPod(t *testing.T) {
 	}
 }
 
+func TestInject_InjectsFloxEnvAndToken(t *testing.T) {
+	inj := &PodFloxWaitInjector{
+		GcrootBase:      "/gc",
+		TokenSecretName: "floxhub-token",
+		TokenSecretKey:  "token",
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"flox.dev/environment.app": "networking/kdns"}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "app"},
+			{Name: "sidecar"}, // not flox-annotated → left untouched
+		}},
+	}
+	if err := inj.Default(context.Background(), pod); err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	app := pod.Spec.Containers[0]
+	if envValue(app.Env, "FLOX_NONINTERACTIVE") != "1" ||
+		envValue(app.Env, "_FLOX_TESTING_DISABLE_BG_SIDE_EFFECTS") != "true" {
+		t.Errorf("flox knobs not injected on annotated container: %+v", app.Env)
+	}
+	tok := findEnv(app.Env, "FLOX_FLOXHUB_TOKEN")
+	if tok == nil || tok.ValueFrom == nil || tok.ValueFrom.SecretKeyRef == nil ||
+		tok.ValueFrom.SecretKeyRef.Name != "floxhub-token" || tok.ValueFrom.SecretKeyRef.Key != "token" {
+		t.Errorf("token env not injected valueFrom the secret: %+v", tok)
+	}
+	if len(pod.Spec.Containers[1].Env) != 0 {
+		t.Errorf("non-annotated sidecar mutated: %+v", pod.Spec.Containers[1].Env)
+	}
+}
+
+func findEnv(env []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			return &env[i]
+		}
+	}
+	return nil
+}
+
+func envValue(env []corev1.EnvVar, name string) string {
+	if e := findEnv(env, name); e != nil {
+		return e.Value
+	}
+	return ""
+}
+
 func TestInject_Idempotent(t *testing.T) {
 	inj := &PodFloxWaitInjector{GcrootBase: "/gc"}
 	pod := &corev1.Pod{
