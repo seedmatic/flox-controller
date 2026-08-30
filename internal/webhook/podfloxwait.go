@@ -127,12 +127,17 @@ func (i *PodFloxWaitInjector) injectFloxEnv(pod *corev1.Pod) {
 			upsertEnv(c, corev1.EnvVar{Name: s.Name, Value: s.Value})
 		}
 		if i.TokenSecretName != "" && i.TokenSecretKey != "" {
+			// optional: the webhook injects cluster-wide, but the (replicated) token secret only
+			// exists in namespaces that created its replicate-from stub — a namespace without it
+			// must NOT wedge on a missing secret; flox there runs unauthenticated (warnings only).
+			optional := true
 			upsertEnv(c, corev1.EnvVar{
 				Name: "FLOX_FLOXHUB_TOKEN",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: i.TokenSecretName},
 						Key:                  i.TokenSecretKey,
+						Optional:             &optional,
 					},
 				},
 			})
