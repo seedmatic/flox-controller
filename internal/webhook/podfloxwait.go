@@ -187,11 +187,16 @@ func waitScript(gcroots []string, timeoutSeconds int) string {
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	for _, p := range gcroots {
+		// Test -L (the gcroot SYMLINK exists), not -e: the gcroot is a nix gcroot symlink into
+		// /nix/store, which this init container does NOT mount (only the gcroot base is), so -e
+		// would follow the symlink to an unreachable target and never succeed. The symlink's
+		// PRESENCE is the barrier signal — the controller placed it; the NRI plugin resolves the
+		// target later (it has /nix). Keep -e as a fallback for a non-symlink gcroot.
 		fmt.Fprintf(&b,
-			"i=0; until [ -e '%s' ]; do i=$((i+1)); "+
+			"i=0; until [ -L '%s' ] || [ -e '%s' ]; do i=$((i+1)); "+
 				"if [ \"$i\" -gt %d ]; then echo 'flox-wait: timed out waiting for %s'; exit 1; fi; "+
 				"echo 'flox-wait: waiting for %s'; sleep 2; done\n",
-			p, maxIters, p, p)
+			p, p, maxIters, p, p)
 	}
 	b.WriteString("echo 'flox-wait: all gcroots present'\n")
 	return b.String()
