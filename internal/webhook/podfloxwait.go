@@ -109,8 +109,11 @@ func (i *PodFloxWaitInjector) Default(_ context.Context, obj runtime.Object) err
 
 // injectFloxEnv upserts the canonical flox settings (floxenv) — and, when a token secret is
 // configured, FLOX_FLOXHUB_TOKEN valueFrom that Secret — onto every container that opted into a
-// flox env via a per-container flox.dev/environment.<container> annotation. Init containers (incl.
-// the flox-wait busybox) are untouched: they are not flox-activated.
+// flox env via a per-container flox.dev/environment.<container> annotation. A flox.dev/environment.<c>
+// annotation may name an INIT container (e.g. headscale's config-init / wait-for-headscale, which run
+// `flox activate` to render config or wait for a barrier): the NRI plugin puts flox on their PATH, so
+// they need the same knobs + token. Our own flox-wait busybox carries no such annotation and is
+// therefore skipped.
 func (i *PodFloxWaitInjector) injectFloxEnv(pod *corev1.Pod) {
 	annotated := map[string]struct{}{}
 	for k, v := range pod.Annotations {
@@ -118,30 +121,38 @@ func (i *PodFloxWaitInjector) injectFloxEnv(pod *corev1.Pod) {
 			annotated[strings.TrimPrefix(k, floxEnvAnnotationPrefix)] = struct{}{}
 		}
 	}
+	for idx := range pod.Spec.InitContainers {
+		i.injectFloxEnvInto(&pod.Spec.InitContainers[idx], annotated)
+	}
 	for idx := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[idx]
-		if _, ok := annotated[c.Name]; !ok {
-			continue
-		}
-		for _, s := range floxenv.Settings() {
-			upsertEnv(c, corev1.EnvVar{Name: s.Name, Value: s.Value})
-		}
-		if i.TokenSecretName != "" && i.TokenSecretKey != "" {
-			// optional: the webhook injects cluster-wide, but the (replicated) token secret only
-			// exists in namespaces that created its replicate-from stub — a namespace without it
-			// must NOT wedge on a missing secret; flox there runs unauthenticated (warnings only).
-			optional := true
-			upsertEnv(c, corev1.EnvVar{
-				Name: "FLOX_FLOXHUB_TOKEN",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: i.TokenSecretName},
-						Key:                  i.TokenSecretKey,
-						Optional:             &optional,
-					},
+		i.injectFloxEnvInto(&pod.Spec.Containers[idx], annotated)
+	}
+}
+
+// injectFloxEnvInto upserts the flox knobs (+ optional token) onto c iff c opted into a flox env
+// (its name appears in the flox.dev/environment.<c> annotation set).
+func (i *PodFloxWaitInjector) injectFloxEnvInto(c *corev1.Container, annotated map[string]struct{}) {
+	if _, ok := annotated[c.Name]; !ok {
+		return
+	}
+	for _, s := range floxenv.Settings() {
+		upsertEnv(c, corev1.EnvVar{Name: s.Name, Value: s.Value})
+	}
+	if i.TokenSecretName != "" && i.TokenSecretKey != "" {
+		// optional: the webhook injects cluster-wide, but the (replicated) token secret only
+		// exists in namespaces that created its replicate-from stub — a namespace without it
+		// must NOT wedge on a missing secret; flox there runs unauthenticated (warnings only).
+		optional := true
+		upsertEnv(c, corev1.EnvVar{
+			Name: "FLOX_FLOXHUB_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: i.TokenSecretName},
+					Key:                  i.TokenSecretKey,
+					Optional:             &optional,
 				},
-			})
-		}
+			},
+		})
 	}
 }
 
