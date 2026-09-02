@@ -70,5 +70,9 @@ func NixConfig() string {
 		"sandbox = false",
 		"min-free = 5368709120",  // 5 GiB
 		"max-free = 10737418240", // 10 GiB
+		// -L by default: surface the builder's stdout/stderr (the maven/cdk8s output) so an
+		// in-cluster render is debuggable from `tkn taskrun logs` without a per-call flag. (CLI
+		// verbosity `-v` has no nix.conf equivalent — it stays a caller flag when wanted.)
+		"print-build-logs = true",
 	}, "\n")
 }
