@@ -11,31 +11,47 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/seedmatic/flox-controller/internal/floxenv"
 )
 
 const (
 	// floxEnvAnnotationPrefix is the per-container opt-in the NRI plugin keys on:
-	// flox.dev/environment.<container> = "<category>/<name>". We mirror it to know which
+	// flox.seedmatic.io/environment.<container> = "<category>/<name>". We mirror it to know which
 	// GC-roots a pod will need before its containers create.
-	floxEnvAnnotationPrefix = "flox.dev/environment."
+	floxEnvAnnotationPrefix = "flox.seedmatic.io/environment."
 	defaultCategory         = "networking" // matches the plugin's bare-name fallback
 
 	floxWaitContainerName = "flox-wait"
 	floxWaitVolumeName    = "flox-gcroots"
+
+	// nixBuildAnnotationPrefix is the per-container opt-in for the nix-build capability:
+	// flox.seedmatic.io/nix-build.<container> = "<pvc-name>". The VALUE is the PVC the step assigns
+	// as its persistent nix store (reused across the step's task runs = a warm cache; distinct steps
+	// name distinct PVCs = isolated stores). We ensure that PVC (create-if-absent) + inject it as a
+	// volume mounted at nixBuildStoreMount + NIX_CONFIG. The NRI plugin reads the same annotation and
+	// hosts the /nix store overlay's upper/work on nixBuildStoreMount.
+	nixBuildAnnotationPrefix = "flox.seedmatic.io/nix-build."
+	// nixBuildStoreMount is the container-absolute path where the assigned nix-store PVC is mounted —
+	// the shared contract between this webhook and the NRI plugin's overlay upper_backing (a sibling
+	// of the gcroot-base constant). Internal, not user-facing.
+	nixBuildStoreMount = "/var/lib/flox-nri/nix-build-store"
 )
 
-// PodFloxWaitInjector is a mutating webhook (CustomDefaulter) that prepends a "flox-wait"
-// init container to any pod bearing flox.dev/environment.<c> annotations. The init container
+// PodFloxMutator is a mutating webhook (CustomDefaulter) that prepends a "flox-wait"
+// init container to any pod bearing flox.seedmatic.io/environment.<c> annotations. The init container
 // hostPath-mounts the GC-root base read-only and blocks until every referenced GC-root
 // (<base>/<category>/<name>) exists on the node — so the flox-controller has realised the env
 // there before the flox-injected containers start. It is NOT itself flox-annotated, so the
 // NRI plugin ignores it (plain shell, no /nix overlay). Node-aware (runs on the assigned
 // node) and can block far longer than an NRI hook or a scheduling gate could.
-type PodFloxWaitInjector struct {
+type PodFloxMutator struct {
 	// GcrootBase is the flox-runtime GC-root dir on the node (matches the controller's
 	// --gcroot-base and the NRI plugin's floxEnvGcrootBase).
 	GcrootBase string
@@ -49,19 +65,35 @@ type PodFloxWaitInjector struct {
 	// into every flox-annotated container. Empty disables token injection (the knobs still go in).
 	TokenSecretName string
 	TokenSecretKey  string
+
+	// Client ensures the nix-build store PVC (named by the pod's annotation) exists
+	// (create-if-absent) when a pod opts into the nix-build capability. nil disables the ensure (the
+	// volume is still injected — the PVC must then pre-exist).
+	Client client.Client
+	// NixStoreClass/NixStoreSize size the ensured PVC (its name comes from the annotation value, the
+	// step-assigned store reused across the step's task runs = a warm nix store cache).
+	NixStoreClass string
+	NixStoreSize  string
 }
 
-// Default injects the flox-wait init container. Idempotent: a pod that already carries it
-// (e.g. a re-admission) is left unchanged.
-func (i *PodFloxWaitInjector) Default(_ context.Context, obj runtime.Object) error {
+// Default is the pod mutator entry point. It dispatches the independent flox concerns; each is a
+// no-op unless its own per-container annotation opted in, so a pod can request any subset.
+func (i *PodFloxMutator) Default(ctx context.Context, obj runtime.Object) error {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return fmt.Errorf("expected *corev1.Pod, got %T", obj)
 	}
+	i.injectFloxWait(pod)
+	return i.injectNixBuild(ctx, pod)
+}
 
+// injectFloxWait handles the flox env concern: it prepends the node-aware "flox-wait" init
+// container + upserts the canonical flox settings/token onto every flox-annotated container.
+// No-op for a pod that opted into no flox env. Idempotent (a re-admission leaves it unchanged).
+func (i *PodFloxMutator) injectFloxWait(pod *corev1.Pod) {
 	gcroots := gcrootsFromAnnotations(pod.Annotations, i.GcrootBase)
 	if len(gcroots) == 0 {
-		return nil // pod opted into no flox env
+		return // pod opted into no flox env
 	}
 
 	// Inject the canonical flox settings (+ the FloxHub token) into every flox-annotated
@@ -71,7 +103,7 @@ func (i *PodFloxWaitInjector) Default(_ context.Context, obj runtime.Object) err
 
 	for _, c := range pod.Spec.InitContainers {
 		if c.Name == floxWaitContainerName {
-			return nil // already injected
+			return // already injected
 		}
 	}
 
@@ -104,17 +136,113 @@ func (i *PodFloxWaitInjector) Default(_ context.Context, obj runtime.Object) err
 			},
 		})
 	}
+}
+
+// injectNixBuild handles the nix-build capability: for every container bearing
+// flox.seedmatic.io/nix-build.<c>=<mountPath>, it ensures the per-namespace persistent nix-store
+// PVC exists, injects it as a shared pod volume mounted at <mountPath> on that container, and
+// upserts NIX_CONFIG. The NRI plugin reads the same annotation and hosts the /nix store overlay's
+// upper/work on <mountPath>, so the persistent PVC becomes the warm store reused across renders.
+// No-op for a pod that opted into no nix-build.
+func (i *PodFloxMutator) injectNixBuild(ctx context.Context, pod *corev1.Pod) error {
+	targets := map[string]string{} // container name -> mount path
+	for k, v := range pod.Annotations {
+		if strings.HasPrefix(k, nixBuildAnnotationPrefix) && v != "" {
+			targets[strings.TrimPrefix(k, nixBuildAnnotationPrefix)] = v
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// Each distinct PVC named across the pod's nix-build containers: ensure it exists + add it as a
+	// pod volume once. The volume name == the PVC name (a DNS-1123 label, valid as a volume name).
+	ensured := map[string]struct{}{}
+	for _, pvcName := range targets {
+		if _, done := ensured[pvcName]; done {
+			continue
+		}
+		ensured[pvcName] = struct{}{}
+		if err := i.ensureNixStorePVC(ctx, pod.Namespace, pvcName); err != nil {
+			return err
+		}
+		if !hasVolume(pod.Spec.Volumes, pvcName) {
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: pvcName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+				},
+			})
+		}
+	}
+
+	for idx := range pod.Spec.InitContainers {
+		if pvc, ok := targets[pod.Spec.InitContainers[idx].Name]; ok {
+			mountNixStore(&pod.Spec.InitContainers[idx], pvc)
+		}
+	}
+	for idx := range pod.Spec.Containers {
+		if pvc, ok := targets[pod.Spec.Containers[idx].Name]; ok {
+			mountNixStore(&pod.Spec.Containers[idx], pvc)
+		}
+	}
+	return nil
+}
+
+// mountNixStore mounts the assigned nix-store volume (named for its PVC) at nixBuildStoreMount and
+// upserts NIX_CONFIG onto c. Idempotent: skips the mount if the container already carries it.
+func mountNixStore(c *corev1.Container, volumeName string) {
+	present := false
+	for _, m := range c.VolumeMounts {
+		if m.Name == volumeName {
+			present = true
+			break
+		}
+	}
+	if !present {
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: nixBuildStoreMount})
+	}
+	upsertEnv(c, corev1.EnvVar{Name: "NIX_CONFIG", Value: floxenv.NixConfig()})
+}
+
+// ensureNixStorePVC create-if-absents the named persistent nix-store PVC in namespace. Idempotent:
+// AlreadyExists is success. A nil Client skips the ensure (the PVC must then pre-exist).
+func (i *PodFloxMutator) ensureNixStorePVC(ctx context.Context, namespace, name string) error {
+	if i.Client == nil {
+		return nil
+	}
+	size := i.NixStoreSize
+	if size == "" {
+		size = "30Gi"
+	}
+	var storageClass *string
+	if i.NixStoreClass != "" {
+		storageClass = &i.NixStoreClass
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: storageClass,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+			},
+		},
+	}
+	if err := i.Client.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("ensure nix-store PVC %s/%s: %w", namespace, name, err)
+	}
 	return nil
 }
 
 // injectFloxEnv upserts the canonical flox settings (floxenv) — and, when a token secret is
 // configured, FLOX_FLOXHUB_TOKEN valueFrom that Secret — onto every container that opted into a
-// flox env via a per-container flox.dev/environment.<container> annotation. A flox.dev/environment.<c>
+// flox env via a per-container flox.seedmatic.io/environment.<container> annotation. A flox.seedmatic.io/environment.<c>
 // annotation may name an INIT container (e.g. headscale's config-init / wait-for-headscale, which run
 // `flox activate` to render config or wait for a barrier): the NRI plugin puts flox on their PATH, so
 // they need the same knobs + token. Our own flox-wait busybox carries no such annotation and is
 // therefore skipped.
-func (i *PodFloxWaitInjector) injectFloxEnv(pod *corev1.Pod) {
+func (i *PodFloxMutator) injectFloxEnv(pod *corev1.Pod) {
 	annotated := map[string]struct{}{}
 	for k, v := range pod.Annotations {
 		if strings.HasPrefix(k, floxEnvAnnotationPrefix) && v != "" {
@@ -130,8 +258,8 @@ func (i *PodFloxWaitInjector) injectFloxEnv(pod *corev1.Pod) {
 }
 
 // injectFloxEnvInto upserts the flox knobs (+ optional token) onto c iff c opted into a flox env
-// (its name appears in the flox.dev/environment.<c> annotation set).
-func (i *PodFloxWaitInjector) injectFloxEnvInto(c *corev1.Container, annotated map[string]struct{}) {
+// (its name appears in the flox.seedmatic.io/environment.<c> annotation set).
+func (i *PodFloxMutator) injectFloxEnvInto(c *corev1.Container, annotated map[string]struct{}) {
 	if _, ok := annotated[c.Name]; !ok {
 		return
 	}
@@ -167,7 +295,7 @@ func upsertEnv(c *corev1.Container, v corev1.EnvVar) {
 	c.Env = append(c.Env, v)
 }
 
-// gcrootsFromAnnotations resolves every flox.dev/environment.<c> annotation to the GC-root
+// gcrootsFromAnnotations resolves every flox.seedmatic.io/environment.<c> annotation to the GC-root
 // path the NRI plugin will readlink: <base>/<category>/<name>. Sorted + de-duplicated so the
 // injected script is stable across admissions.
 func gcrootsFromAnnotations(annotations map[string]string, base string) []string {
@@ -222,10 +350,12 @@ func hasVolume(volumes []corev1.Volume, name string) bool {
 	return false
 }
 
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;create
+
 // SetupWebhookWithManager registers the pod-mutating webhook. Only wired when the controller
 // runs with --enable-webhook (the cluster-manager Deployment), never in the node-agent
 // DaemonSet — serving the webhook requires TLS certs the DaemonSet has no reason to carry.
-func (i *PodFloxWaitInjector) SetupWebhookWithManager(mgr ctrl.Manager) error {
+func (i *PodFloxMutator) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(&corev1.Pod{}).
 		WithDefaulter(i).

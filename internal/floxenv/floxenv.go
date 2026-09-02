@@ -9,6 +9,8 @@
 // a static behavioural knob.
 package floxenv
 
+import "strings"
+
 // Setting is one flox behavioural knob — a name/value applied to flox's environment.
 type Setting struct {
 	Name  string
@@ -39,4 +41,34 @@ func Environ() []string {
 		out = append(out, s.Name+"="+s.Value)
 	}
 	return out
+}
+
+// NixConfig is the NIX_CONFIG value the flox-nri system injects into a nix-build container. A pod's
+// nix is single-user + daemonless with no nix.conf, so the flake commands need these enabled
+// explicitly (dev inherits them from the user's global nix.conf):
+//
+//	experimental-features = nix-command flakes  the flake CLI (`nix run`/`nix build`)
+//	build-users-group =                         build as the pod user (no `nixbld` group)
+//	sandbox = false                             the unprivileged pod can't set up the build sandbox
+//	min-free / max-free                         store GC: bound the persistent nix-store PVC
+//
+// The GC is nix-NATIVE, not a manual `nix store gc` (which deletes ALL unreferenced paths → wipes
+// the warm cache every run). During a build, when the store filesystem's free space drops below
+// min-free, nix garbage-collects unreferenced paths (LRU) until max-free is free, then continues.
+// On the /nix overlay this reaps unrooted UPPER paths only — the node's read-only lower store is
+// fully GC-rooted, so it is untouched and the merged view stays coherent (statvfs on the overlay
+// reports the upper PVC's free space, so the thresholds track the PVC's fill). This keeps the store
+// bounded WITHOUT wiping the warm cache — it frees only what a build needs. Sized for the 30Gi
+// nix-store PVC: GC when < min-free (5 GiB) free, down to max-free (10 GiB), keeping ~20 GiB warm.
+//
+// NIX_CONFIG merges newline-separated key=value lines and is inherited by nested nix processes, so
+// one env var covers the outer `nix run` and the render app's inner `nix build`.
+func NixConfig() string {
+	return strings.Join([]string{
+		"experimental-features = nix-command flakes",
+		"build-users-group =",
+		"sandbox = false",
+		"min-free = 5368709120",  // 5 GiB
+		"max-free = 10737418240", // 10 GiB
+	}, "\n")
 }

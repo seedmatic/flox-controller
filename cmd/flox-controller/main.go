@@ -66,6 +66,7 @@ func main() {
 		"namespace for the controller's embedded base carrier FloxEnv")
 	var enableWebhook bool
 	var waitImage, tokenSecretName, tokenSecretKey string
+	var nixStoreClass, nixStoreSize string
 	flag.BoolVar(&enableWebhook, "enable-webhook", false,
 		"serve the pod-mutating webhook (needs TLS certs at the webhook cert dir) — a Service fronts the DaemonSet pods; the mutation is stateless so any pod serves")
 	flag.StringVar(&waitImage, "flox-wait-image", "busybox:stable",
@@ -74,6 +75,10 @@ func main() {
 		"name of the (replicated) Secret carrying the FloxHub token; empty disables token injection")
 	flag.StringVar(&tokenSecretKey, "token-secret-key", "token",
 		"key within the token secret holding the FloxHub token value")
+	flag.StringVar(&nixStoreClass, "nix-store-class", "openebs-zfs-shared",
+		"StorageClass for the ensured nix-store PVC; empty uses the cluster default")
+	flag.StringVar(&nixStoreSize, "nix-store-size", "30Gi",
+		"requested size of the ensured nix-store PVC")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -137,12 +142,15 @@ func main() {
 	// Service (stateless mutation → any pod serves); serving needs the TLS cert mounted at the
 	// webhook cert dir. The FloxHub token is injected valueFrom the replicated token Secret.
 	if enableWebhook {
-		if err := (&floxwebhook.PodFloxWaitInjector{
+		if err := (&floxwebhook.PodFloxMutator{
 			GcrootBase:      gcrootBase,
 			WaitImage:       waitImage,
 			TimeoutSeconds:  120,
 			TokenSecretName: tokenSecretName,
 			TokenSecretKey:  tokenSecretKey,
+			Client:        mgr.GetClient(),
+			NixStoreClass: nixStoreClass,
+			NixStoreSize:  nixStoreSize,
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up webhook", "webhook", "PodFloxWait")
 			os.Exit(1)

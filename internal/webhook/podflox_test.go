@@ -10,12 +10,12 @@ import (
 )
 
 func TestInject_AddsWaitForAnnotatedPod(t *testing.T) {
-	inj := &PodFloxWaitInjector{GcrootBase: "/nix/var/nix/gcroots/flox-runtime/env", TimeoutSeconds: 60}
+	inj := &PodFloxMutator{GcrootBase: "/nix/var/nix/gcroots/flox-runtime/env", TimeoutSeconds: 60}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
-				"flox.dev/environment.app":   "networking/kdns",
-				"flox.dev/environment.tools": "debug", // bare name → defaults to networking
+				"flox.seedmatic.io/environment.app":   "networking/kdns",
+				"flox.seedmatic.io/environment.tools": "debug", // bare name → defaults to networking
 			},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
@@ -39,13 +39,13 @@ func TestInject_AddsWaitForAnnotatedPod(t *testing.T) {
 }
 
 func TestInject_InjectsFloxEnvAndToken(t *testing.T) {
-	inj := &PodFloxWaitInjector{
+	inj := &PodFloxMutator{
 		GcrootBase:      "/gc",
 		TokenSecretName: "floxhub-token",
 		TokenSecretKey:  "token",
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"flox.dev/environment.app": "networking/kdns"}},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"flox.seedmatic.io/environment.app": "networking/kdns"}},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{Name: "app"},
 			{Name: "sidecar"}, // not flox-annotated → left untouched
@@ -86,9 +86,9 @@ func envValue(env []corev1.EnvVar, name string) string {
 }
 
 func TestInject_Idempotent(t *testing.T) {
-	inj := &PodFloxWaitInjector{GcrootBase: "/gc"}
+	inj := &PodFloxMutator{GcrootBase: "/gc"}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"flox.dev/environment.app": "networking/kdns"}},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"flox.seedmatic.io/environment.app": "networking/kdns"}},
 	}
 	_ = inj.Default(context.Background(), pod)
 	_ = inj.Default(context.Background(), pod)
@@ -98,12 +98,44 @@ func TestInject_Idempotent(t *testing.T) {
 }
 
 func TestInject_NoopWithoutAnnotations(t *testing.T) {
-	inj := &PodFloxWaitInjector{GcrootBase: "/gc"}
+	inj := &PodFloxMutator{GcrootBase: "/gc"}
 	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}}}
 	if err := inj.Default(context.Background(), pod); err != nil {
 		t.Fatal(err)
 	}
 	if len(pod.Spec.InitContainers) != 0 || len(pod.Spec.Volumes) != 0 {
 		t.Error("should not mutate an unannotated pod")
+	}
+}
+
+func TestInject_NixBuild(t *testing.T) {
+	// nil Client → ensure is skipped (the volume/mount/NIX_CONFIG are still injected).
+	inj := &PodFloxMutator{GcrootBase: "/gc"}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{"flox.seedmatic.io/nix-build.builder": "render-store"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "builder"}, {Name: "sidecar"}}},
+	}
+	if err := inj.Default(context.Background(), pod); err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	// The named PVC is added as a pod volume (volume name == PVC name).
+	if !hasVolume(pod.Spec.Volumes, "render-store") {
+		t.Fatalf("nix-store volume not added: %+v", pod.Spec.Volumes)
+	}
+	if pvc := pod.Spec.Volumes[0].PersistentVolumeClaim; pvc == nil || pvc.ClaimName != "render-store" {
+		t.Errorf("volume is not the named PVC: %+v", pod.Spec.Volumes[0].VolumeSource)
+	}
+	// Only the annotated container is mounted + gets NIX_CONFIG.
+	builder := pod.Spec.Containers[0]
+	if len(builder.VolumeMounts) != 1 || builder.VolumeMounts[0].MountPath != nixBuildStoreMount {
+		t.Errorf("builder mount = %+v (want %s)", builder.VolumeMounts, nixBuildStoreMount)
+	}
+	if envValue(builder.Env, "NIX_CONFIG") == "" {
+		t.Error("builder missing NIX_CONFIG")
+	}
+	if len(pod.Spec.Containers[1].VolumeMounts) != 0 {
+		t.Error("unannotated sidecar should not be mounted")
 	}
 }
