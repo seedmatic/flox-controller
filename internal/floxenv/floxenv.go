@@ -66,6 +66,13 @@ func Environ() []string {
 func NixConfig() string {
 	return strings.Join([]string{
 		"experimental-features = nix-command flakes",
+		// Trust the flake's own nixConfig (it declares pure-eval=false so `builtins.getEnv`
+		// works). Without this, nix logs "ignoring untrusted flake configuration setting
+		// 'pure-eval'" and evaluates PURE → getEnv returns "" → a build that reads host env
+		// (e.g. the render's M2_REPO/MAVEN_BUILD_CACHE for its maven cache) silently sees
+		// nothing and rebuilds cold every run. Inherited by the inner `nix build`, so the
+		// flake's declaration applies without a per-invocation --impure.
+		"accept-flake-config = true",
 		"build-users-group =",
 		"sandbox = false",
 		"min-free = 5368709120",  // 5 GiB
