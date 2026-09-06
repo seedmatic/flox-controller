@@ -65,12 +65,10 @@ func main() {
 	flag.StringVar(&baseCarrierNamespace, "base-carrier-namespace", defaultCarrierNs,
 		"namespace for the controller's embedded base carrier FloxEnv")
 	var enableWebhook bool
-	var waitImage, tokenSecretName, tokenSecretKey string
+	var tokenSecretName, tokenSecretKey string
 	var nixStoreClass, nixStoreSize string
 	flag.BoolVar(&enableWebhook, "enable-webhook", false,
-		"serve the pod-mutating webhook (needs TLS certs at the webhook cert dir) — a Service fronts the DaemonSet pods; the mutation is stateless so any pod serves")
-	flag.StringVar(&waitImage, "flox-wait-image", "busybox:stable",
-		"image for the injected flox-wait init container (needs /bin/sh)")
+		"serve the pod-mutating webhook + run the scheduling-gate reconciler (needs TLS certs at the webhook cert dir) — a Service fronts the DaemonSet pods; the mutation is stateless so any pod serves")
 	flag.StringVar(&tokenSecretName, "token-secret-name", "",
 		"name of the (replicated) Secret carrying the FloxHub token; empty disables token injection")
 	flag.StringVar(&tokenSecretKey, "token-secret-key", "token",
@@ -137,25 +135,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The pod-mutating webhook (--enable-webhook) injects the node-aware flox-wait barrier +
-	// the flox env/token into flox-annotated pods. It runs in every DaemonSet pod behind a
-	// Service (stateless mutation → any pod serves); serving needs the TLS cert mounted at the
-	// webhook cert dir. The FloxHub token is injected valueFrom the replicated token Secret.
+	// The pod-mutating webhook (--enable-webhook) adds the env-ready scheduling gate + the flox
+	// env/token to flox-annotated pods; the paired gate reconciler narrows a gated pod to its
+	// ready nodes and removes the gate once every referenced FloxEnv is realised at the current
+	// generation. Both run in the cluster-manager (a Service fronts the DaemonSet pods; the
+	// mutation is stateless so any pod serves); serving needs the TLS cert mounted at the webhook
+	// cert dir. The FloxHub token is injected valueFrom the replicated token Secret.
 	if enableWebhook {
 		if err := (&floxwebhook.PodFloxMutator{
-			GcrootBase:      gcrootBase,
-			WaitImage:       waitImage,
-			TimeoutSeconds:  120,
 			TokenSecretName: tokenSecretName,
 			TokenSecretKey:  tokenSecretKey,
-			Client:        mgr.GetClient(),
-			NixStoreClass: nixStoreClass,
-			NixStoreSize:  nixStoreSize,
+			Client:          mgr.GetClient(),
+			NixStoreClass:   nixStoreClass,
+			NixStoreSize:    nixStoreSize,
 		}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to set up webhook", "webhook", "PodFloxWait")
+			setupLog.Error(err, "unable to set up webhook", "webhook", "PodFlox")
 			os.Exit(1)
 		}
-		setupLog.Info("pod flox-wait mutating webhook enabled")
+		if err := (&controller.PodGateReconciler{
+			Client: mgr.GetClient(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up controller", "controller", "PodGate")
+			os.Exit(1)
+		}
+		setupLog.Info("pod flox mutating webhook + scheduling-gate reconciler enabled")
 	}
 
 	// Self-provision the controller's own base carrier once the cache is up. Best-effort:

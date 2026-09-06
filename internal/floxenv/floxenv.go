@@ -9,7 +9,61 @@
 // a static behavioural knob.
 package floxenv
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
+
+const (
+	// AnnotationPrefix is the per-container opt-in the NRI plugin keys on:
+	// flox.seedmatic.io/environment.<container> = "<folder>/<name>". The webhook mirrors it to
+	// know which envs a pod consumes; the gate reconciler resolves each to a FloxEnv.
+	AnnotationPrefix = "flox.seedmatic.io/environment."
+	// DefaultCategory is the folder a bare-name annotation value (no "/") resolves against —
+	// matches the plugin's bare-name fallback.
+	DefaultCategory = "networking"
+	// SchedulingGateName is the scheduling gate the webhook adds to a flox-consuming pod; the
+	// gate reconciler removes it once every referenced FloxEnv is realised at the current
+	// generation. Until then the pod stays SchedulingGated (unscheduled, no container starts).
+	SchedulingGateName = "flox.seedmatic.io/env-ready"
+)
+
+// EnvRef is a flox env coordinate as an annotation encodes it: the host-layout (folder, name)
+// pair, matching a FloxEnv's (spec.folder-or-namespace, metadata.name).
+type EnvRef struct {
+	Folder string
+	Name   string
+}
+
+// RefsFromAnnotations resolves every flox.seedmatic.io/environment.<c> annotation to an EnvRef,
+// de-duplicated and sorted (stable ordering for idempotent mutation + reconcile). The value is
+// "<folder>/<name>"; the name is the LAST segment (a FloxEnv's metadata.name is DNS-1123, never
+// contains "/"), so the folder is everything before it — this recovers a STRUCTURED spec.folder
+// ("mesh/base") intact, not just its first segment. A bare value (no "/") uses DefaultCategory.
+func RefsFromAnnotations(annotations map[string]string) []EnvRef {
+	seen := map[EnvRef]struct{}{}
+	for k, v := range annotations {
+		if !strings.HasPrefix(k, AnnotationPrefix) || v == "" {
+			continue
+		}
+		folder, name := DefaultCategory, v
+		if i := strings.LastIndex(v, "/"); i >= 0 {
+			folder, name = v[:i], v[i+1:]
+		}
+		seen[EnvRef{Folder: folder, Name: name}] = struct{}{}
+	}
+	refs := make([]EnvRef, 0, len(seen))
+	for r := range seen {
+		refs = append(refs, r)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Folder != refs[j].Folder {
+			return refs[i].Folder < refs[j].Folder
+		}
+		return refs[i].Name < refs[j].Name
+	})
+	return refs
+}
 
 // Setting is one flox behavioural knob — a name/value applied to flox's environment.
 type Setting struct {

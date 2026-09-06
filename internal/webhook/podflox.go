@@ -1,13 +1,12 @@
-// Package webhook holds the flox-controller admission webhooks. The pod flox-wait
-// injector is the node-aware race barrier: a pod that opts into a flox env must not start
-// its (flox-injected) containers until that env's GC-root exists on the node it landed on.
+// Package webhook holds the flox-controller admission webhooks. The pod flox mutator is the
+// node-aware race barrier: a pod that opts into a flox env is admitted with a scheduling gate so
+// it stays unscheduled (no container starts) until the controller's gate reconciler observes the
+// env realised at the current generation and removes the gate.
 package webhook
 
 import (
 	"context"
 	"fmt"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -22,15 +21,6 @@ import (
 )
 
 const (
-	// floxEnvAnnotationPrefix is the per-container opt-in the NRI plugin keys on:
-	// flox.seedmatic.io/environment.<container> = "<category>/<name>". We mirror it to know which
-	// GC-roots a pod will need before its containers create.
-	floxEnvAnnotationPrefix = "flox.seedmatic.io/environment."
-	defaultCategory         = "networking" // matches the plugin's bare-name fallback
-
-	floxWaitContainerName = "flox-wait"
-	floxWaitVolumeName    = "flox-gcroots"
-
 	// nixBuildAnnotationPrefix is the per-container opt-in for the nix-build capability:
 	// flox.seedmatic.io/nix-build.<container> = "<pvc-name>". The VALUE is the PVC the step assigns
 	// as its persistent nix store (reused across the step's task runs = a warm cache; distinct steps
@@ -44,22 +34,13 @@ const (
 	nixBuildStoreMount = "/var/lib/flox-nri/nix-build-store"
 )
 
-// PodFloxMutator is a mutating webhook (CustomDefaulter) that prepends a "flox-wait"
-// init container to any pod bearing flox.seedmatic.io/environment.<c> annotations. The init container
-// hostPath-mounts the GC-root base read-only and blocks until every referenced GC-root
-// (<base>/<category>/<name>) exists on the node — so the flox-controller has realised the env
-// there before the flox-injected containers start. It is NOT itself flox-annotated, so the
-// NRI plugin ignores it (plain shell, no /nix overlay). Node-aware (runs on the assigned
-// node) and can block far longer than an NRI hook or a scheduling gate could.
+// PodFloxMutator is a mutating webhook (CustomDefaulter) that adds a scheduling gate to any pod
+// bearing flox.seedmatic.io/environment.<c> annotations, so the pod stays SchedulingGated
+// (unscheduled, no container starts) until the controller's gate reconciler removes the gate —
+// which it does once every referenced FloxEnv is realised at the pod's current generation. The
+// pod itself needs no node access and no API access: the controller owns both the realisation
+// and the ungate. It also upserts the canonical flox settings/token onto the annotated containers.
 type PodFloxMutator struct {
-	// GcrootBase is the flox-runtime GC-root dir on the node (matches the controller's
-	// --gcroot-base and the NRI plugin's floxEnvGcrootBase).
-	GcrootBase string
-	// WaitImage is the tiny image the init container runs (needs /bin/sh); e.g. busybox.
-	WaitImage string
-	// TimeoutSeconds bounds the wait; on expiry the init container fails so the stall is
-	// visible (CrashLoopBackOff) rather than hanging forever.
-	TimeoutSeconds int
 	// TokenSecretName/TokenSecretKey locate the FloxHub token (a replicated Secret present
 	// in the pod's namespace). When set, FLOX_FLOXHUB_TOKEN is injected valueFrom that key
 	// into every flox-annotated container. Empty disables token injection (the knobs still go in).
@@ -87,12 +68,16 @@ func (i *PodFloxMutator) Default(ctx context.Context, obj runtime.Object) error 
 	return i.injectNixBuild(ctx, pod)
 }
 
-// injectFloxWait handles the flox env concern: it prepends the node-aware "flox-wait" init
-// container + upserts the canonical flox settings/token onto every flox-annotated container.
-// No-op for a pod that opted into no flox env. Idempotent (a re-admission leaves it unchanged).
+// injectFloxWait handles the flox env concern: it adds the env-ready scheduling gate + upserts
+// the canonical flox settings/token onto every flox-annotated container. No-op for a pod that
+// opted into no flox env. Idempotent (a re-admission leaves it unchanged).
+//
+// Adding a scheduling gate is only legal at pod CREATE (the API server rejects adding one via
+// update, and once the gate reconciler removes it the scheduler assigns a node). The mutating
+// webhook config MUST therefore scope this to CREATE; the pod.Spec.NodeName guard below is
+// defence-in-depth so a stray UPDATE admission never re-gates a pod the scheduler already placed.
 func (i *PodFloxMutator) injectFloxWait(pod *corev1.Pod) {
-	gcroots := gcrootsFromAnnotations(pod.Annotations, i.GcrootBase)
-	if len(gcroots) == 0 {
+	if len(floxenv.RefsFromAnnotations(pod.Annotations)) == 0 {
 		return // pod opted into no flox env
 	}
 
@@ -101,41 +86,16 @@ func (i *PodFloxMutator) injectFloxWait(pod *corev1.Pod) {
 	// ConfigMap envFrom. Idempotent (upsert): a var already set on the container wins.
 	i.injectFloxEnv(pod)
 
-	for _, c := range pod.Spec.InitContainers {
-		if c.Name == floxWaitContainerName {
-			return // already injected
+	if pod.Spec.NodeName != "" {
+		return // already scheduled — must not (and cannot) add a gate
+	}
+	for _, g := range pod.Spec.SchedulingGates {
+		if g.Name == floxenv.SchedulingGateName {
+			return // already gated
 		}
 	}
-
-	timeout := i.TimeoutSeconds
-	if timeout <= 0 {
-		timeout = 120
-	}
-	image := i.WaitImage
-	if image == "" {
-		image = "busybox:stable"
-	}
-
-	pod.Spec.InitContainers = append([]corev1.Container{{
-		Name:    floxWaitContainerName,
-		Image:   image,
-		Command: []string{"/bin/sh", "-c", waitScript(gcroots, timeout)},
-		VolumeMounts: []corev1.VolumeMount{{
-			Name:      floxWaitVolumeName,
-			MountPath: i.GcrootBase,
-			ReadOnly:  true,
-		}},
-	}}, pod.Spec.InitContainers...)
-
-	if !hasVolume(pod.Spec.Volumes, floxWaitVolumeName) {
-		hostPathDir := corev1.HostPathDirectoryOrCreate
-		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-			Name: floxWaitVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: i.GcrootBase, Type: &hostPathDir},
-			},
-		})
-	}
+	pod.Spec.SchedulingGates = append(pod.Spec.SchedulingGates,
+		corev1.PodSchedulingGate{Name: floxenv.SchedulingGateName})
 }
 
 // injectNixBuild handles the nix-build capability: for every container bearing
@@ -245,8 +205,8 @@ func (i *PodFloxMutator) ensureNixStorePVC(ctx context.Context, namespace, name 
 func (i *PodFloxMutator) injectFloxEnv(pod *corev1.Pod) {
 	annotated := map[string]struct{}{}
 	for k, v := range pod.Annotations {
-		if strings.HasPrefix(k, floxEnvAnnotationPrefix) && v != "" {
-			annotated[strings.TrimPrefix(k, floxEnvAnnotationPrefix)] = struct{}{}
+		if strings.HasPrefix(k, floxenv.AnnotationPrefix) && v != "" {
+			annotated[strings.TrimPrefix(k, floxenv.AnnotationPrefix)] = struct{}{}
 		}
 	}
 	for idx := range pod.Spec.InitContainers {
@@ -293,52 +253,6 @@ func upsertEnv(c *corev1.Container, v corev1.EnvVar) {
 		}
 	}
 	c.Env = append(c.Env, v)
-}
-
-// gcrootsFromAnnotations resolves every flox.seedmatic.io/environment.<c> annotation to the GC-root
-// path the NRI plugin will readlink: <base>/<category>/<name>. Sorted + de-duplicated so the
-// injected script is stable across admissions.
-func gcrootsFromAnnotations(annotations map[string]string, base string) []string {
-	seen := map[string]struct{}{}
-	for k, v := range annotations {
-		if !strings.HasPrefix(k, floxEnvAnnotationPrefix) || v == "" {
-			continue
-		}
-		category, name := defaultCategory, v
-		if parts := strings.SplitN(v, "/", 2); len(parts) == 2 {
-			category, name = parts[0], parts[1]
-		}
-		seen[filepath.Join(base, category, name)] = struct{}{}
-	}
-	paths := make([]string, 0, len(seen))
-	for p := range seen {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	return paths
-}
-
-func waitScript(gcroots []string, timeoutSeconds int) string {
-	maxIters := timeoutSeconds / 2
-	if maxIters < 1 {
-		maxIters = 1
-	}
-	var b strings.Builder
-	b.WriteString("set -eu\n")
-	for _, p := range gcroots {
-		// Test -L (the gcroot SYMLINK exists), not -e: the gcroot is a nix gcroot symlink into
-		// /nix/store, which this init container does NOT mount (only the gcroot base is), so -e
-		// would follow the symlink to an unreachable target and never succeed. The symlink's
-		// PRESENCE is the barrier signal — the controller placed it; the NRI plugin resolves the
-		// target later (it has /nix). Keep -e as a fallback for a non-symlink gcroot.
-		fmt.Fprintf(&b,
-			"i=0; until [ -L '%s' ] || [ -e '%s' ]; do i=$((i+1)); "+
-				"if [ \"$i\" -gt %d ]; then echo 'flox-wait: timed out waiting for %s'; exit 1; fi; "+
-				"echo 'flox-wait: waiting for %s'; sleep 2; done\n",
-			p, p, maxIters, p, p)
-	}
-	b.WriteString("echo 'flox-wait: all gcroots present'\n")
-	return b.String()
 }
 
 func hasVolume(volumes []corev1.Volume, name string) bool {
