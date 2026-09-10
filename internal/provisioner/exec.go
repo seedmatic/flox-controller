@@ -175,16 +175,21 @@ func (p *ExecProvisioner) addEnvSubtree(ctx context.Context, ref EnvRef, floxEnv
 // FLOX_FLOXHUB_TOKEN when the DaemonSet wires it from the replicated Secret) plus the canonical
 // flox behavioural knobs — the single source in floxenv, shared with the pod-injecting webhook.
 //
-// When the DaemonSet wires GITHUB_ACCESS_TOKEN (the App token github-token-manager mints into the
-// github-token Secret), merge it into NIX_CONFIG as an access-tokens line: `flox activate` runs the
-// HOST nix via nsenter, which reads NIX_CONFIG from this env, so a FloxEnv flake resolving a PRIVATE
-// input (github:seedmatic/claude-hub via ndh) fetches AS the App instead of 404ing anonymously.
-// NIX_CONFIG merges newline-separated settings, so this appends to whatever the DaemonSet already
-// set (e.g. print-build-logs). Absent (before gtm has minted) → the env is left unchanged and the
-// private-input envs simply fail to realise until the token lands.
+// When GITHUB_ACCESS_TOKEN_FILE points at a readable file (the DaemonSet mounts the replicated
+// github-token Secret there — the App token github-token-manager mints), merge its contents into
+// NIX_CONFIG as an access-tokens line: `flox activate` runs the HOST nix via nsenter, which reads
+// NIX_CONFIG from this env, so a FloxEnv flake resolving a PRIVATE input (github:seedmatic/claude-hub
+// via ndh) fetches AS the App instead of 404ing anonymously. NIX_CONFIG merges newline-separated
+// settings, so this appends to whatever the DaemonSet already set (e.g. print-build-logs).
+//
+// The token is read from the FILE — fresh on every call, so that gtm's ~45m rotation and the token's
+// first arrival (it is minted + replicated shortly AFTER the pod starts) are both picked up with no
+// restart. A pod-start env var, frozen at its start value, could do neither: it would miss the first
+// mint and serve an expired token after the first rotation. Absent/unreadable file → env unchanged
+// and private-input envs simply fail to realise until the token lands.
 func floxCommandEnv() []string {
 	env := append(os.Environ(), floxenv.Environ()...)
-	token := os.Getenv("GITHUB_ACCESS_TOKEN")
+	token := readGithubToken()
 	if token == "" {
 		return env
 	}
@@ -201,6 +206,22 @@ func floxCommandEnv() []string {
 		out = append(out, e)
 	}
 	return append(out, "NIX_CONFIG="+nixConfig)
+}
+
+// readGithubToken reads the GitHub App token from the file GITHUB_ACCESS_TOKEN_FILE names (the
+// DaemonSet's mounted github-token Secret). Read fresh per call so kubelet's live volume refresh is
+// always reflected. Empty when the env is unset or the file is absent/unreadable (before the token
+// is minted + replicated).
+func readGithubToken() string {
+	path := os.Getenv("GITHUB_ACCESS_TOKEN_FILE")
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // buildEnv activates the env in the given mode (which locks-if-needed + realises its

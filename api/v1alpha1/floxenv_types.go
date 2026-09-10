@@ -87,6 +87,14 @@ type FloxEnvStatus struct {
 	// +optional
 	Lock string `json:"lock,omitempty"`
 
+	// RelockToken echoes the last honored value of the flox.seedmatic.io/relock annotation. When
+	// the annotation's value differs from this, the reconciler drops status.Lock so the next realise
+	// re-locks from scratch (pulls fresh flake inputs) instead of re-using the pin — then records the
+	// value here, so a given force fires exactly once per distinct annotation value. Patch the
+	// annotation (e.g. to a timestamp) to force a re-lock without editing spec or restarting.
+	// +optional
+	RelockToken string `json:"relockToken,omitempty"`
+
 	// Resolved reports what each package resolved to, for inspection.
 	// +optional
 	Resolved map[string]string `json:"resolved,omitempty"`

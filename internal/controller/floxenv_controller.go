@@ -24,6 +24,11 @@ import (
 // spec.manifest when the maintainer didn't set it (they shouldn't — it's flox plumbing).
 const floxSchemaVersion = "1.14.0"
 
+// relockAnnotation forces a fresh re-lock: when its value differs from status.RelockToken, the
+// reconciler drops the pinned lock so Realize re-locks from scratch (see FloxEnvStatus.RelockToken).
+// Patch it (e.g. to a timestamp) to re-pull a FloxEnv's flake inputs without editing spec.
+const relockAnnotation = "flox.seedmatic.io/relock"
+
 // FloxEnvReconciler realises a FloxEnv onto the LOCAL node's nix store.
 //
 // Node-agent model: one instance per node (run as a DaemonSet); each instance
@@ -73,10 +78,19 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return r.fail(ctx, &env, "SerializeFailed", err)
 	}
 
+	// A change to the relock annotation drops the pinned lock so this realise re-locks from scratch
+	// (pulls fresh flake inputs) instead of re-using status.Lock. Recorded into status after a
+	// successful realise, so the force fires exactly once per distinct annotation value.
+	relock := env.Annotations[relockAnnotation]
+	lock := env.Status.Lock
+	if relock != env.Status.RelockToken {
+		lock = ""
+	}
+
 	res, err := r.Provisioner.Realize(ctx, provisioner.RealizeRequest{
 		Ref:          provisioner.EnvRef{Folder: folder, Name: env.Name},
 		ManifestTOML: manifestTOML,
-		Lock:         env.Status.Lock,
+		Lock:         lock,
 		Consumption:  consumption,
 	})
 	if err != nil {
@@ -88,6 +102,7 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if res.Lock != "" {
 		env.Status.Lock = res.Lock // pin-of-record; fed back verbatim (RealizeRequest.Lock) next reconcile
 	}
+	env.Status.RelockToken = relock // honored: this force (if any) fired, don't repeat it
 	upsertRealization(&env.Status, floxv1alpha1.NodeRealization{
 		Node:               r.NodeName,
 		Ready:              true,
