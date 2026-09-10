@@ -174,8 +174,33 @@ func (p *ExecProvisioner) addEnvSubtree(ctx context.Context, ref EnvRef, floxEnv
 // floxCommandEnv is the environment for flox subprocesses: the process env (which carries
 // FLOX_FLOXHUB_TOKEN when the DaemonSet wires it from the replicated Secret) plus the canonical
 // flox behavioural knobs — the single source in floxenv, shared with the pod-injecting webhook.
+//
+// When the DaemonSet wires GITHUB_ACCESS_TOKEN (the App token github-token-manager mints into the
+// github-token Secret), merge it into NIX_CONFIG as an access-tokens line: `flox activate` runs the
+// HOST nix via nsenter, which reads NIX_CONFIG from this env, so a FloxEnv flake resolving a PRIVATE
+// input (github:seedmatic/claude-hub via ndh) fetches AS the App instead of 404ing anonymously.
+// NIX_CONFIG merges newline-separated settings, so this appends to whatever the DaemonSet already
+// set (e.g. print-build-logs). Absent (before gtm has minted) → the env is left unchanged and the
+// private-input envs simply fail to realise until the token lands.
 func floxCommandEnv() []string {
-	return append(os.Environ(), floxenv.Environ()...)
+	env := append(os.Environ(), floxenv.Environ()...)
+	token := os.Getenv("GITHUB_ACCESS_TOKEN")
+	if token == "" {
+		return env
+	}
+	nixConfig := os.Getenv("NIX_CONFIG")
+	if nixConfig != "" {
+		nixConfig += "\n"
+	}
+	nixConfig += "access-tokens = github.com=" + token
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, "NIX_CONFIG=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, "NIX_CONFIG="+nixConfig)
 }
 
 // buildEnv activates the env in the given mode (which locks-if-needed + realises its
@@ -191,7 +216,7 @@ func floxCommandEnv() []string {
 // symlink by its "-<mode>" suffix; do NOT return the first /nix/store entry — it sorts
 // to "-dev" alphabetically, which would gcroot the dev scaffolding into a workload pod.
 func (p *ExecProvisioner) buildEnv(ctx context.Context, dir, mode string) (string, error) {
-	cmd := p.command(ctx, "flox", "activate", "--mode", mode, "-d", dir, "--", "true")
+	cmd := p.command(ctx, "flox", "--verbose", "activate", "--mode", mode, "-d", dir, "--", "true")
 	cmd.Env = floxCommandEnv()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
