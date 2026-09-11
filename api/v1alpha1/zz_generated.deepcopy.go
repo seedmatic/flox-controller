@@ -198,6 +198,11 @@ func (in *FloxEnvSpec) DeepCopyInto(out *FloxEnvSpec) {
 		*out = new(UpdatePolicy)
 		**out = **in
 	}
+	if in.DependsOn != nil {
+		in, out := &in.DependsOn, &out.DependsOn
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Inject != nil {
 		in, out := &in.Inject, &out.Inject
 		*out = make([]InjectedEnv, len(*in))

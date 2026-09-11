@@ -48,6 +48,17 @@ type FloxEnvSpec struct {
 	// +optional
 	Folder string `json:"folder,omitempty"`
 
+	// DependsOn names FloxEnvs (in this namespace) that must be Realized before this one — the
+	// EXPLICIT realise-order hint. The flox `include` MECHANISM stays flox-native in the manifest
+	// (opaque to the controller); an env that `include`s another's tree needs that other's source
+	// materialised first, so its AUTHOR (which owns both the manifest and the CR) declares the order
+	// here. The controller realises in parallel and holds an env in WaitingForDeps until every
+	// dependency is Ready — so parallelism never races an include. Empty = no ordering (realise as
+	// soon as scheduled).
+	// +optional
+	// +listType=set
+	DependsOn []string `json:"dependsOn,omitempty"`
+
 	// Inject declares env vars the flox-controller's pod webhook adds to every container that opts
 	// into THIS env via a flox.seedmatic.io/environment.<c> annotation — how a FloxEnv contributes
 	// REQUIRED runtime env/secrets to its consumers (e.g. the git-sops env contributes SOPS_AGE_KEY

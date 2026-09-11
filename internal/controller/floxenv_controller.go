@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
@@ -39,6 +40,11 @@ type FloxEnvReconciler struct {
 	client.Client
 	NodeName    string
 	Provisioner provisioner.Provisioner
+	// MaxConcurrent bounds parallel realisation (MaxConcurrentReconciles). Independent envs realise
+	// concurrently; a dependency (spec.dependsOn) still holds an env in WaitingForDeps, so ordering
+	// is preserved. Each realise is a node-side nix build (via nsenter, NOT this pod's cgroup), so
+	// keep it modest — the ceiling is the node's memory, not the controller's. 0/1 = serial.
+	MaxConcurrent int
 }
 
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;create;update;patch;delete
@@ -59,6 +65,14 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// this they would show a blank phase until their turn. The requeue then does the real work.
 	if meta.FindStatusCondition(env.Status.Conditions, "Ready") == nil {
 		return r.markPending(ctx, &env)
+	}
+
+	// Idempotent short-circuit: this node already realised the current generation and no relock is
+	// pending → nothing to do. Returning WITHOUT a status write is what keeps the reconcile from
+	// looping — a Realizing/Realized flip on every pass would re-enqueue us (the For-watch reacts to
+	// status updates) and re-run the carrier's slow containerize each time.
+	if r.alreadyRealized(&env) {
+		return ctrl.Result{}, nil
 	}
 
 	// spec.folder defaults to the namespace; spec.consumption to overlay.
@@ -83,6 +97,13 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	manifestTOML, err := manifestToTOML(manifest)
 	if err != nil {
 		return r.fail(ctx, &env, "SerializeFailed", err)
+	}
+
+	// Hold until every declared dependency is Realized, so parallel realisation never races an env's
+	// flox `include` of another's materialised tree. Requeue (not block) — the worker stays free for
+	// the envs that CAN realise now.
+	if unmet := r.unmetDeps(ctx, &env); len(unmet) > 0 {
+		return r.waitForDeps(ctx, &env, unmet)
 	}
 
 	// A change to the relock annotation drops the pinned lock so this realise re-locks from scratch
@@ -201,6 +222,55 @@ func (r *FloxEnvReconciler) markRealizing(ctx context.Context, env *floxv1alpha1
 		ObservedGeneration: env.Generation,
 	})
 	_ = r.Status().Patch(ctx, env, client.MergeFrom(base))
+}
+
+// alreadyRealized reports whether this node has realised the env's CURRENT generation with no relock
+// pending — the steady state where a reconcile has nothing to do. Keeping it side-effect-free (no
+// status write) is what stops the reconcile from re-enqueuing itself.
+func (r *FloxEnvReconciler) alreadyRealized(env *floxv1alpha1.FloxEnv) bool {
+	if env.Annotations[relockAnnotation] != env.Status.RelockToken {
+		return false // a relock is pending — must re-realise
+	}
+	for _, nr := range env.Status.Realized {
+		if nr.Node == r.NodeName && nr.Ready && nr.ObservedGeneration == env.Generation {
+			return true
+		}
+	}
+	return false
+}
+
+// unmetDeps returns the spec.dependsOn FloxEnvs (same namespace) that are not yet Ready — a missing
+// dependency counts as unmet.
+func (r *FloxEnvReconciler) unmetDeps(ctx context.Context, env *floxv1alpha1.FloxEnv) []string {
+	var unmet []string
+	for _, name := range env.Spec.DependsOn {
+		var dep floxv1alpha1.FloxEnv
+		if err := r.Get(
+			ctx, client.ObjectKey{Namespace: env.Namespace, Name: name}, &dep); err != nil {
+			unmet = append(unmet, name)
+			continue
+		}
+		if !meta.IsStatusConditionTrue(dep.Status.Conditions, "Ready") {
+			unmet = append(unmet, name)
+		}
+	}
+	return unmet
+}
+
+// waitForDeps records WaitingForDeps and requeues (no error, no backoff spam) until the declared
+// dependencies are Ready.
+func (r *FloxEnvReconciler) waitForDeps(
+	ctx context.Context, env *floxv1alpha1.FloxEnv, unmet []string) (ctrl.Result, error) {
+	base := env.DeepCopy()
+	meta.SetStatusCondition(&env.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "WaitingForDeps",
+		Message:            "waiting for FloxEnvs to be Ready: " + strings.Join(unmet, ", "),
+		ObservedGeneration: env.Generation,
+	})
+	_ = r.Status().Patch(ctx, env, client.MergeFrom(base))
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // parseManifest decodes spec.manifest (stored as JSON by the API server) into a mutable map
@@ -324,5 +394,6 @@ func upsertRealization(st *floxv1alpha1.FloxEnvStatus, nr floxv1alpha1.NodeReali
 func (r *FloxEnvReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&floxv1alpha1.FloxEnv{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrent}).
 		Complete(r)
 }
