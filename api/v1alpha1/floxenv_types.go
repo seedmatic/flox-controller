@@ -47,6 +47,44 @@ type FloxEnvSpec struct {
 	// manifest `include` paths resolve against. Defaults to metadata.namespace when empty.
 	// +optional
 	Folder string `json:"folder,omitempty"`
+
+	// Inject declares env vars the flox-controller's pod webhook adds to every container that opts
+	// into THIS env via a flox.seedmatic.io/environment.<c> annotation — how a FloxEnv contributes
+	// REQUIRED runtime env/secrets to its consumers (e.g. the git-sops env contributes SOPS_AGE_KEY
+	// from the sops-age Secret), so a consumer only annotates the env and never wires the env's
+	// secrets itself. A referenced Secret must exist in the consumer pod's namespace (replicate it
+	// there); injection is secretKeyRef (kubelet resolves it), the controller reads no secret.
+	// +optional
+	Inject []InjectedEnv `json:"inject,omitempty"`
+}
+
+// InjectedEnv is one env var a FloxEnv contributes to its consumers (see FloxEnvSpec.Inject).
+// Exactly one of Value / SecretKeyRef is set.
+type InjectedEnv struct {
+	// Name is the env var name (e.g. SOPS_AGE_KEY).
+	Name string `json:"name"`
+
+	// Value is a literal value.
+	// +optional
+	Value string `json:"value,omitempty"`
+
+	// SecretKeyRef injects valueFrom a Secret key in the consumer pod's namespace.
+	// +optional
+	SecretKeyRef *InjectedSecretKeyRef `json:"secretKeyRef,omitempty"`
+}
+
+// InjectedSecretKeyRef selects a key of a Secret resolved in the consumer pod's namespace.
+type InjectedSecretKeyRef struct {
+	// Name is the Secret name.
+	Name string `json:"name"`
+
+	// Key is the key within the Secret's data.
+	Key string `json:"key"`
+
+	// Optional, when true, lets the container start even if the Secret/key is absent (the env is
+	// then unset) — mirrors core/v1 secretKeyRef.optional. Defaults false.
+	// +optional
+	Optional *bool `json:"optional,omitempty"`
 }
 
 // NodeRealization reports one node's realisation of the env.

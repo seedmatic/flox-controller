@@ -16,7 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
 	"github.com/seedmatic/flox-controller/internal/floxenv"
 )
 
@@ -48,9 +50,13 @@ type PodFloxMutator struct {
 	TokenSecretKey  string
 
 	// Client ensures the nix-build store PVC (named by the pod's annotation) exists
-	// (create-if-absent) when a pod opts into the nix-build capability. nil disables the ensure (the
-	// volume is still injected — the PVC must then pre-exist).
+	// (create-if-absent) when a pod opts into the nix-build capability, and READS the FloxEnv CR a
+	// container opts into to apply its spec.inject. nil disables both (volume still injected — the
+	// PVC must then pre-exist; and no per-env inject).
 	Client client.Client
+	// FloxEnvNamespace is where the FloxEnv CRs live (the controller's own namespace) — the webhook
+	// GETs `<annotation-value name>` there to read its spec.inject. Empty disables inject.
+	FloxEnvNamespace string
 	// NixStoreClass/NixStoreSize size the ensured PVC (its name comes from the annotation value, the
 	// step-assigned store reused across the step's task runs = a warm nix store cache).
 	NixStoreClass string
@@ -64,7 +70,7 @@ func (i *PodFloxMutator) Default(ctx context.Context, obj runtime.Object) error 
 	if !ok {
 		return fmt.Errorf("expected *corev1.Pod, got %T", obj)
 	}
-	i.injectFloxWait(pod)
+	i.injectFloxWait(ctx, pod)
 	return i.injectNixBuild(ctx, pod)
 }
 
@@ -76,15 +82,15 @@ func (i *PodFloxMutator) Default(ctx context.Context, obj runtime.Object) error 
 // update, and once the gate reconciler removes it the scheduler assigns a node). The mutating
 // webhook config MUST therefore scope this to CREATE; the pod.Spec.NodeName guard below is
 // defence-in-depth so a stray UPDATE admission never re-gates a pod the scheduler already placed.
-func (i *PodFloxMutator) injectFloxWait(pod *corev1.Pod) {
+func (i *PodFloxMutator) injectFloxWait(ctx context.Context, pod *corev1.Pod) {
 	if len(floxenv.RefsFromAnnotations(pod.Annotations)) == 0 {
 		return // pod opted into no flox env
 	}
 
-	// Inject the canonical flox settings (+ the FloxHub token) into every flox-annotated
-	// container — the single vector, subsuming the NRI plugin's AddEnv and the flox-runtime
-	// ConfigMap envFrom. Idempotent (upsert): a var already set on the container wins.
-	i.injectFloxEnv(pod)
+	// Inject the canonical flox settings (+ the FloxHub token, + each env's declared spec.inject)
+	// into every flox-annotated container — the single vector, subsuming the NRI plugin's AddEnv and
+	// the flox-runtime ConfigMap envFrom. Idempotent (upsert): a var already set on the container wins.
+	i.injectFloxEnv(ctx, pod)
 
 	if pod.Spec.NodeName != "" {
 		return // already scheduled — must not (and cannot) add a gate
@@ -202,25 +208,60 @@ func (i *PodFloxMutator) ensureNixStorePVC(ctx context.Context, namespace, name 
 // `flox activate` to render config or wait for a barrier): the NRI plugin puts flox on their PATH, so
 // they need the same knobs + token. Our own flox-wait busybox carries no such annotation and is
 // therefore skipped.
-func (i *PodFloxMutator) injectFloxEnv(pod *corev1.Pod) {
-	annotated := map[string]struct{}{}
+func (i *PodFloxMutator) injectFloxEnv(ctx context.Context, pod *corev1.Pod) {
+	// Map each opted-in container to the env it named (annotation VALUE = "<folder>/<name>"; the
+	// FloxEnv CR name is that value's last segment), then resolve each distinct env's spec.inject
+	// ONCE by GETting the CR in FloxEnvNamespace.
+	envOf := map[string]string{}
 	for k, v := range pod.Annotations {
 		if strings.HasPrefix(k, floxenv.AnnotationPrefix) && v != "" {
-			annotated[strings.TrimPrefix(k, floxenv.AnnotationPrefix)] = struct{}{}
+			envOf[strings.TrimPrefix(k, floxenv.AnnotationPrefix)] = envName(v)
 		}
 	}
+	injects := i.resolveInjects(ctx, envOf)
 	for idx := range pod.Spec.InitContainers {
-		i.injectFloxEnvInto(&pod.Spec.InitContainers[idx], annotated)
+		i.injectFloxEnvInto(&pod.Spec.InitContainers[idx], envOf, injects)
 	}
 	for idx := range pod.Spec.Containers {
-		i.injectFloxEnvInto(&pod.Spec.Containers[idx], annotated)
+		i.injectFloxEnvInto(&pod.Spec.Containers[idx], envOf, injects)
 	}
 }
 
-// injectFloxEnvInto upserts the flox knobs (+ optional token) onto c iff c opted into a flox env
-// (its name appears in the flox.seedmatic.io/environment.<c> annotation set).
-func (i *PodFloxMutator) injectFloxEnvInto(c *corev1.Container, annotated map[string]struct{}) {
-	if _, ok := annotated[c.Name]; !ok {
+// resolveInjects GETs each distinct FloxEnv named in envOf (from FloxEnvNamespace) and returns its
+// spec.inject, keyed by env name. A missing env / absent client is a nil entry (no inject), never a
+// hard failure — a pod must still admit if an env's CR is momentarily unreadable.
+func (i *PodFloxMutator) resolveInjects(
+	ctx context.Context, envOf map[string]string,
+) map[string][]floxv1alpha1.InjectedEnv {
+	out := map[string][]floxv1alpha1.InjectedEnv{}
+	if i.Client == nil || i.FloxEnvNamespace == "" {
+		return out
+	}
+	for _, name := range envOf {
+		if _, done := out[name]; done {
+			continue
+		}
+		var env floxv1alpha1.FloxEnv
+		if err := i.Client.Get(
+			ctx, client.ObjectKey{Namespace: i.FloxEnvNamespace, Name: name}, &env); err != nil {
+			if !apierrors.IsNotFound(err) {
+				log.FromContext(ctx).Error(err, "flox inject: GET FloxEnv failed", "name", name)
+			}
+			out[name] = nil
+			continue
+		}
+		out[name] = env.Spec.Inject
+	}
+	return out
+}
+
+// injectFloxEnvInto upserts the flox knobs (+ optional FloxHub token, + the container's env's
+// declared spec.inject) onto c iff c opted into a flox env (its name is a key of envOf).
+func (i *PodFloxMutator) injectFloxEnvInto(
+	c *corev1.Container, envOf map[string]string, injects map[string][]floxv1alpha1.InjectedEnv,
+) {
+	name, ok := envOf[c.Name]
+	if !ok {
 		return
 	}
 	for _, s := range floxenv.Settings() {
@@ -242,6 +283,37 @@ func (i *PodFloxMutator) injectFloxEnvInto(c *corev1.Container, annotated map[st
 			},
 		})
 	}
+	// The env's own contributions (e.g. git-sops → SOPS_AGE_KEY). upsert: an explicit value on the
+	// pod spec still wins.
+	for _, inj := range injects[name] {
+		upsertEnv(c, injectedEnvVar(inj))
+	}
+}
+
+// envName is the FloxEnv CR name an environment.<c> annotation VALUE ("<folder>/<name>") points at
+// — the segment after the last '/'.
+func envName(value string) string {
+	if i := strings.LastIndex(value, "/"); i >= 0 {
+		return value[i+1:]
+	}
+	return value
+}
+
+// injectedEnvVar renders a FloxEnv spec.inject entry as a container EnvVar (secretKeyRef or literal).
+func injectedEnvVar(inj floxv1alpha1.InjectedEnv) corev1.EnvVar {
+	if inj.SecretKeyRef != nil {
+		return corev1.EnvVar{
+			Name: inj.Name,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: inj.SecretKeyRef.Name},
+					Key:                  inj.SecretKeyRef.Key,
+					Optional:             inj.SecretKeyRef.Optional,
+				},
+			},
+		}
+	}
+	return corev1.EnvVar{Name: inj.Name, Value: inj.Value}
 }
 
 // upsertEnv sets env var v on the container unless a var of that name is already present — an

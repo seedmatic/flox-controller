@@ -143,11 +143,12 @@ func main() {
 	// cert dir. The FloxHub token is injected valueFrom the replicated token Secret.
 	if enableWebhook {
 		if err := (&floxwebhook.PodFloxMutator{
-			TokenSecretName: tokenSecretName,
-			TokenSecretKey:  tokenSecretKey,
-			Client:          mgr.GetClient(),
-			NixStoreClass:   nixStoreClass,
-			NixStoreSize:    nixStoreSize,
+			TokenSecretName:  tokenSecretName,
+			TokenSecretKey:   tokenSecretKey,
+			Client:           mgr.GetClient(),
+			FloxEnvNamespace: baseCarrierNamespace,
+			NixStoreClass:    nixStoreClass,
+			NixStoreSize:     nixStoreSize,
 		}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up webhook", "webhook", "PodFlox")
 			os.Exit(1)
