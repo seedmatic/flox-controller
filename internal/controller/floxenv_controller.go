@@ -54,6 +54,13 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// First touch: publish Pending and requeue. Realise is serial + blocking (each is a node nix
+	// build), so only one env is Realizing at a time and the rest sit in the workqueue — without
+	// this they would show a blank phase until their turn. The requeue then does the real work.
+	if meta.FindStatusCondition(env.Status.Conditions, "Ready") == nil {
+		return r.markPending(ctx, &env)
+	}
+
 	// spec.folder defaults to the namespace; spec.consumption to overlay.
 	folder := env.Spec.Folder
 	if folder == "" {
@@ -161,6 +168,24 @@ func (r *FloxEnvReconciler) waitForFlake(ctx context.Context, env *floxv1alpha1.
 	})
 	_ = r.Status().Patch(ctx, env, client.MergeFrom(base))
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+// markPending publishes a Ready=False/Pending condition on an env's first touch and requeues, so a
+// queued env (waiting behind the serial, blocking realise) shows "Pending" instead of a blank phase.
+func (r *FloxEnvReconciler) markPending(
+	ctx context.Context, env *floxv1alpha1.FloxEnv) (ctrl.Result, error) {
+	base := env.DeepCopy()
+	meta.SetStatusCondition(&env.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "Pending",
+		Message:            "queued for realisation",
+		ObservedGeneration: env.Generation,
+	})
+	if err := r.Status().Patch(ctx, env, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // markRealizing publishes a Ready=False/Realizing condition before the (blocking) Realize, so the

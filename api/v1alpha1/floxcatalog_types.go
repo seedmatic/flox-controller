@@ -64,11 +64,31 @@ type FloxCatalogStatus struct {
 	// +optional
 	EnvsSummary string `json:"envsSummary,omitempty"`
 
+	// Envs is the per-env realisation PLAN behind EnvsSummary — each FloxEnv in this namespace with
+	// its current phase (Pending / Realizing / Realized / WaitingForFlake / *Failed). So `kubectl
+	// describe floxcatalog` shows the whole plan at once, not the count alone.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Envs []FloxEnvPhase `json:"envs,omitempty"`
+
 	// Conditions is the standard condition set (Ready once an artifact is resolved).
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// FloxEnvPhase is one FloxEnv's realisation phase in a FloxCatalog's rollup plan (see
+// FloxCatalogStatus.Envs).
+type FloxEnvPhase struct {
+	// Name of the FloxEnv.
+	Name string `json:"name"`
+
+	// Phase is its current phase — the FloxEnv's Ready condition reason (Pending / Realizing /
+	// Realized / WaitingForFlake / *Failed), or empty before it has a condition.
+	// +optional
+	Phase string `json:"phase,omitempty"`
 }
 
 // +kubebuilder:object:root=true

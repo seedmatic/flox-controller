@@ -86,7 +86,7 @@ func (r *FloxCatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	flake.Status.Revision = revision
 	flake.Status.ArtifactURL = url
 	flake.Status.FlakeRef = flakeRef
-	flake.Status.EnvsSummary = r.envsSummary(ctx, flake.Namespace)
+	flake.Status.EnvsSummary, flake.Status.Envs = r.envsRollup(ctx, flake.Namespace)
 	meta.SetStatusCondition(&flake.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
@@ -167,30 +167,37 @@ func (r *FloxCatalogReconciler) catalogsForSource(ctx context.Context, obj clien
 	return reqs
 }
 
-// envsSummary rolls up FloxEnv realisation in namespace for the status column: "<ready>/<total>
-// ready" (+ ", <k> realizing" while node-side builds are in flight). "" on a list error — a
-// transient blank beats a stale count.
-func (r *FloxCatalogReconciler) envsSummary(ctx context.Context, namespace string) string {
+// envsRollup lists the FloxEnvs in namespace and returns both the one-line summary ("<ready>/<total>
+// ready" + ", <k> realizing" while node builds are in flight) for the Envs column AND the per-env
+// plan (name -> phase) for status.envs. Empty on a list error — a transient blank beats a stale
+// count.
+func (r *FloxCatalogReconciler) envsRollup(
+	ctx context.Context, namespace string,
+) (string, []floxv1alpha1.FloxEnvPhase) {
 	var envs floxv1alpha1.FloxEnvList
 	if err := r.List(ctx, &envs, client.InNamespace(namespace)); err != nil {
-		return ""
+		return "", nil
 	}
 	ready, realizing := 0, 0
+	plan := make([]floxv1alpha1.FloxEnvPhase, 0, len(envs.Items))
 	for i := range envs.Items {
-		c := meta.FindStatusCondition(envs.Items[i].Status.Conditions, "Ready")
-		switch {
-		case c == nil:
-		case c.Status == metav1.ConditionTrue:
-			ready++
-		case c.Reason == "Realizing":
-			realizing++
+		phase := ""
+		if c := meta.FindStatusCondition(envs.Items[i].Status.Conditions, "Ready"); c != nil {
+			phase = c.Reason
+			switch {
+			case c.Status == metav1.ConditionTrue:
+				ready++
+			case c.Reason == "Realizing":
+				realizing++
+			}
 		}
+		plan = append(plan, floxv1alpha1.FloxEnvPhase{Name: envs.Items[i].Name, Phase: phase})
 	}
 	summary := fmt.Sprintf("%d/%d ready", ready, len(envs.Items))
 	if realizing > 0 {
 		summary += fmt.Sprintf(", %d realizing", realizing)
 	}
-	return summary
+	return summary, plan
 }
 
 // catalogsForEnv enqueues every FloxCatalog in a changed FloxEnv's namespace, so the envsSummary
