@@ -57,6 +57,13 @@ type FloxCatalogStatus struct {
 	// +optional
 	FlakeRef string `json:"flakeRef,omitempty"`
 
+	// EnvsSummary rolls up realisation of the FloxEnvs in this catalog's namespace (e.g. "6/8 ready"
+	// or "6/8 ready, 2 realizing") — a single-glance progress view so following the reconcile does
+	// not mean tailing the controller logs or listing every FloxEnv. The controller watches the
+	// FloxEnvs and recomputes this whenever one changes.
+	// +optional
+	EnvsSummary string `json:"envsSummary,omitempty"`
+
 	// Conditions is the standard condition set (Ready once an artifact is resolved).
 	// +optional
 	// +listType=map
@@ -71,6 +78,7 @@ type FloxCatalogStatus struct {
 // +kubebuilder:printcolumn:name="Dir",type=string,JSONPath=`.spec.dir`
 // +kubebuilder:printcolumn:name="Revision",type=string,JSONPath=`.status.revision`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Envs",type=string,JSONPath=`.status.envsSummary`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // FloxCatalog binds a nix flake (a workload-package catalog) to a Flux source.

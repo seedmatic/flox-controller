@@ -156,6 +156,7 @@ type FloxEnvStatus struct {
 // +kubebuilder:printcolumn:name="Consumption",type=string,JSONPath=`.spec.consumption`
 // +kubebuilder:printcolumn:name="Folder",type=string,JSONPath=`.spec.folder`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // FloxEnv is a flox environment as a first-class Kubernetes resource.

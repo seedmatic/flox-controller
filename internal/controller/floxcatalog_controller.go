@@ -86,6 +86,7 @@ func (r *FloxCatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	flake.Status.Revision = revision
 	flake.Status.ArtifactURL = url
 	flake.Status.FlakeRef = flakeRef
+	flake.Status.EnvsSummary = r.envsSummary(ctx, flake.Namespace)
 	meta.SetStatusCondition(&flake.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
@@ -166,13 +167,61 @@ func (r *FloxCatalogReconciler) catalogsForSource(ctx context.Context, obj clien
 	return reqs
 }
 
+// envsSummary rolls up FloxEnv realisation in namespace for the status column: "<ready>/<total>
+// ready" (+ ", <k> realizing" while node-side builds are in flight). "" on a list error — a
+// transient blank beats a stale count.
+func (r *FloxCatalogReconciler) envsSummary(ctx context.Context, namespace string) string {
+	var envs floxv1alpha1.FloxEnvList
+	if err := r.List(ctx, &envs, client.InNamespace(namespace)); err != nil {
+		return ""
+	}
+	ready, realizing := 0, 0
+	for i := range envs.Items {
+		c := meta.FindStatusCondition(envs.Items[i].Status.Conditions, "Ready")
+		switch {
+		case c == nil:
+		case c.Status == metav1.ConditionTrue:
+			ready++
+		case c.Reason == "Realizing":
+			realizing++
+		}
+	}
+	summary := fmt.Sprintf("%d/%d ready", ready, len(envs.Items))
+	if realizing > 0 {
+		summary += fmt.Sprintf(", %d realizing", realizing)
+	}
+	return summary
+}
+
+// catalogsForEnv enqueues every FloxCatalog in a changed FloxEnv's namespace, so the envsSummary
+// rollup refreshes as envs move through Realizing -> Realized.
+func (r *FloxCatalogReconciler) catalogsForEnv(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	var list floxv1alpha1.FloxCatalogList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: list.Items[i].Namespace, Name: list.Items[i].Name,
+			},
+		})
+	}
+	return reqs
+}
+
 // SetupWithManager watches FloxCatalog + the referenced GitRepository (unstructured), so a
-// new reconciled artifact re-resolves the flake ref.
+// new reconciled artifact re-resolves the flake ref; and the FloxEnvs, so the envsSummary rollup
+// tracks their realisation.
 func (r *FloxCatalogReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	src := &unstructured.Unstructured{}
 	src.SetGroupVersionKind(gitRepositoryGVK)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&floxv1alpha1.FloxCatalog{}).
 		Watches(src, handler.EnqueueRequestsFromMapFunc(r.catalogsForSource)).
+		Watches(&floxv1alpha1.FloxEnv{}, handler.EnqueueRequestsFromMapFunc(r.catalogsForEnv)).
 		Complete(r)
 }

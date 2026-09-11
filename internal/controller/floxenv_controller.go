@@ -87,6 +87,11 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		lock = ""
 	}
 
+	// Surface that a (possibly long) node-side nix build is in flight: the reconcile BLOCKS in
+	// Realize, so without this the env would keep showing its prior phase until the build returns.
+	// Best-effort — a failed patch only loses the transient Realizing hint.
+	r.markRealizing(ctx, &env)
+
 	res, err := r.Provisioner.Realize(ctx, provisioner.RealizeRequest{
 		Ref:          provisioner.EnvRef{Folder: folder, Name: env.Name},
 		ManifestTOML: manifestTOML,
@@ -156,6 +161,21 @@ func (r *FloxEnvReconciler) waitForFlake(ctx context.Context, env *floxv1alpha1.
 	})
 	_ = r.Status().Patch(ctx, env, client.MergeFrom(base))
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+// markRealizing publishes a Ready=False/Realizing condition before the (blocking) Realize, so the
+// env's Phase column reads "Realizing" while the node-side build runs. Best-effort: a failed patch
+// only loses the transient hint, and the terminal condition (Realized / *Failed) overwrites it.
+func (r *FloxEnvReconciler) markRealizing(ctx context.Context, env *floxv1alpha1.FloxEnv) {
+	base := env.DeepCopy()
+	meta.SetStatusCondition(&env.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "Realizing",
+		Message:            "realising the env closure on " + r.NodeName,
+		ObservedGeneration: env.Generation,
+	})
+	_ = r.Status().Patch(ctx, env, client.MergeFrom(base))
 }
 
 // parseManifest decodes spec.manifest (stored as JSON by the API server) into a mutable map
