@@ -44,7 +44,7 @@ func inSeparateMountNamespaceFromInit() bool {
 }
 
 func main() {
-	var probeAddr, envRoot, gcrootBase, ctrBin, containerdAddress, nsenterBin, baseCarrierNamespace string
+	var probeAddr, envRoot, gcrootBase, ctrBin, containerdAddress, nsenterBin, baseCarrierNamespace, systemdRunBin string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
 	flag.StringVar(&envRoot, "env-root", "/var/lib/flox-controller/envs",
 		"host dir where .flox env sources materialise (<env-root>/<folder>/<name>)")
@@ -56,6 +56,8 @@ func main() {
 		"containerd socket ctr imports into (rke2's k3s-containerd)")
 	flag.StringVar(&nsenterBin, "nsenter-bin", "/usr/local/bin/nsenter",
 		"nsenter used to reach host tools when containerized (baked real-file); empty disables")
+	flag.StringVar(&systemdRunBin, "systemd-run-bin", "/run/current-system/sw/bin/systemd-run",
+		"host systemd-run (absolute path — resolved in the host mount ns) wrapping memory-heavy builds in a transient host-cgroup scope so they escape the pod's memory limit; empty disables scoping")
 	// The controller owns its base carrier: it self-provisions it (see internal/carrier).
 	// Defaults to the controller's own namespace (always exists), else flox-system.
 	defaultCarrierNs := os.Getenv("POD_NAMESPACE")
@@ -118,6 +120,7 @@ func main() {
 			CtrBin:            ctrBin,
 			ContainerdAddress: containerdAddress,
 			Nsenter:           nsenter,
+			SystemdRunBin:     systemdRunBin,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up controller", "controller", "FloxEnv")

@@ -29,12 +29,21 @@ import (
 //     Flux artifact's in-cluster ClusterIP, and host-originated traffic reaches ClusterIPs
 //     (Cilium) while BYPASSING the pod NetworkPolicies that otherwise deny a non-flux-system pod
 //     the source-controller artifact port (the pod netns times out).
+//   - SystemdRunBin: when non-empty (and containerized), the memory-HEAVY builds (flox activate /
+//     containerize) are wrapped in `systemd-run --scope` so they run in a transient HOST cgroup,
+//     bounded by the node's memory — NOT the controller pod's memory limit. nsenter enters the
+//     host mount/pid/net namespaces but NOT the cgroup, so without this the node-side build is
+//     still charged to the pod's memory cgroup and OOMs on the big mesh closures (the "node-side
+//     headroom" the design intends is otherwise a fiction). Referenced by ABSOLUTE host path: it
+//     is resolved in the host mount namespace, where the pod's PATH does not apply. Empty disables
+//     scoping (the build runs unscoped — fine for a non-systemd host or the direct nix-run).
 type ExecProvisioner struct {
 	EnvRoot           string
 	GcrootBase        string
 	CtrBin            string
 	ContainerdAddress string
 	Nsenter           string
+	SystemdRunBin     string
 }
 
 // command builds an *exec.Cmd for a host tool (flox/ctr). When Nsenter is set the tool runs in
@@ -46,6 +55,27 @@ func (p *ExecProvisioner) command(ctx context.Context, name string, args ...stri
 		return exec.CommandContext(ctx, p.Nsenter, full...)
 	}
 	return exec.CommandContext(ctx, name, args...)
+}
+
+// hostScopedCommand builds an *exec.Cmd for a memory-HEAVY host tool (the flox build /
+// containerize). Same host-namespace entry as command(), but when containerized it additionally
+// wraps the tool in `systemd-run --scope` so the build runs in a transient HOST cgroup (bounded by
+// the node's memory) instead of the controller pod's memory cgroup — nsenter enters the host
+// mount/pid/net namespaces but NOT the cgroup, so without this the build is charged to the pod's
+// memory limit and OOMs on the big mesh closures. --scope runs the command synchronously and
+// propagates its exit status + stdio; --collect reaps the transient unit even on failure. A direct
+// (host) run needs no scope — the nix-run is already a host process outside any pod cgroup; and an
+// empty SystemdRunBin falls back to the unscoped nsenter command (non-systemd host).
+func (p *ExecProvisioner) hostScopedCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if p.Nsenter == "" || p.SystemdRunBin == "" {
+		return p.command(ctx, name, args...)
+	}
+	scoped := append([]string{
+		"--target", "1", "--mount", "--pid", "--net", "--",
+		p.SystemdRunBin, "--scope", "--quiet", "--collect", "--",
+		name,
+	}, args...)
+	return exec.CommandContext(ctx, p.Nsenter, scoped...)
 }
 
 func (p *ExecProvisioner) envDir(ref EnvRef) string {
@@ -237,7 +267,7 @@ func readGithubToken() string {
 // symlink by its "-<mode>" suffix; do NOT return the first /nix/store entry — it sorts
 // to "-dev" alphabetically, which would gcroot the dev scaffolding into a workload pod.
 func (p *ExecProvisioner) buildEnv(ctx context.Context, dir, mode string) (string, error) {
-	cmd := p.command(ctx, "flox", "--verbose", "activate", "--mode", mode, "-d", dir, "--", "true")
+	cmd := p.hostScopedCommand(ctx, "flox", "--verbose", "activate", "--mode", mode, "-d", dir, "--", "true")
 	cmd.Env = floxCommandEnv()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -289,7 +319,7 @@ func (p *ExecProvisioner) writeGcroot(gc, storePath string) error {
 // into containerd's k8s.io namespace.
 func (p *ExecProvisioner) containerizeAndImport(ctx context.Context, dir string) error {
 	tar := filepath.Join(dir, ".flox", "containerize.tar")
-	build := p.command(ctx, "flox", "containerize", "-d", dir, "-f", tar)
+	build := p.hostScopedCommand(ctx, "flox", "containerize", "-d", dir, "-f", tar)
 	build.Env = floxCommandEnv()
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
