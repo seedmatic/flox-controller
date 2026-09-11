@@ -25,6 +25,12 @@ import (
 // spec.manifest when the maintainer didn't set it (they shouldn't — it's flox plumbing).
 const floxSchemaVersion = "1.14.0"
 
+// maxConcurrentReconciles lets independent FloxEnvs realise in parallel. It is deliberately high,
+// NOT a tuned job count: the controller does not manage parallelism — the node's nix throttles the
+// actual concurrent BUILDS via its own max-jobs/cores. spec.dependsOn still serialises where a real
+// order exists (WaitingForDeps).
+const maxConcurrentReconciles = 100
+
 // relockAnnotation forces a fresh re-lock: when its value differs from status.RelockToken, the
 // reconciler drops the pinned lock so Realize re-locks from scratch (see FloxEnvStatus.RelockToken).
 // Patch it (e.g. to a timestamp) to re-pull a FloxEnv's flake inputs without editing spec.
@@ -40,11 +46,6 @@ type FloxEnvReconciler struct {
 	client.Client
 	NodeName    string
 	Provisioner provisioner.Provisioner
-	// MaxConcurrent bounds parallel realisation (MaxConcurrentReconciles). Independent envs realise
-	// concurrently; a dependency (spec.dependsOn) still holds an env in WaitingForDeps, so ordering
-	// is preserved. Each realise is a node-side nix build (via nsenter, NOT this pod's cgroup), so
-	// keep it modest — the ceiling is the node's memory, not the controller's. 0/1 = serial.
-	MaxConcurrent int
 }
 
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;create;update;patch;delete
@@ -394,6 +395,6 @@ func upsertRealization(st *floxv1alpha1.FloxEnvStatus, nr floxv1alpha1.NodeReali
 func (r *FloxEnvReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&floxv1alpha1.FloxEnv{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrent}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
 }

@@ -77,9 +77,6 @@ func main() {
 		"StorageClass for the ensured nix-store PVC; empty uses the cluster default")
 	flag.StringVar(&nixStoreSize, "nix-store-size", "30Gi",
 		"requested size of the ensured nix-store PVC")
-	var maxConcurrentEnvRealizations int
-	flag.IntVar(&maxConcurrentEnvRealizations, "max-concurrent-env-realizations", 4,
-		"parallel FloxEnv realisations (MaxConcurrentReconciles); a declared spec.dependsOn still holds an env in WaitingForDeps, so ordering is preserved. Each realise is a node-side nix build (not this pod's cgroup), so the ceiling is node memory — keep modest")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -113,9 +110,8 @@ func main() {
 	}
 
 	if err := (&controller.FloxEnvReconciler{
-		Client:        mgr.GetClient(),
-		NodeName:      nodeName,
-		MaxConcurrent: maxConcurrentEnvRealizations,
+		Client:   mgr.GetClient(),
+		NodeName: nodeName,
 		Provisioner: &provisioner.ExecProvisioner{
 			EnvRoot:           envRoot,
 			GcrootBase:        gcrootBase,
