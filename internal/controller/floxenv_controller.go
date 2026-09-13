@@ -51,6 +51,7 @@ type FloxEnvReconciler struct {
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets;statefulsets,verbs=get;list;watch;patch
 
 // Reconcile realises the desired FloxEnv onto this node's host /nix/store.
 func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -112,6 +113,7 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// successful realise, so the force fires exactly once per distinct annotation value.
 	relock := env.Annotations[relockAnnotation]
 	lock := env.Status.Lock
+	previousLock := env.Status.Lock // the last realized pin, to detect a real change post-realise
 	if relock != env.Status.RelockToken {
 		lock = ""
 	}
@@ -130,6 +132,17 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err != nil {
 		l.Error(err, "realize failed", "env", req.NamespacedName, "node", r.NodeName)
 		return r.fail(ctx, &env, "RealizeFailed", err)
+	}
+
+	// Close the delivery loop: a re-lock only makes the new binary AVAILABLE — a running consumer
+	// keeps the old closure until it restarts (the NRI plugin resolves the env at container start).
+	// So when the realized lock actually CHANGED, roll the workloads that consume this env. Done
+	// BEFORE the status patch (below) so a failure leaves status.Lock at the old pin and the next
+	// reconcile re-realises (nix cache-hit) and retries the roll.
+	if res.Lock != "" && res.Lock != previousLock {
+		if err := r.restartConsumers(ctx, &env, res.Lock); err != nil {
+			return r.fail(ctx, &env, "RestartConsumersFailed", err)
+		}
 	}
 
 	base := env.DeepCopy()
