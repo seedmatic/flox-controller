@@ -40,6 +40,7 @@ type FloxCatalogReconciler struct {
 
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get;list;watch
 
 // Reconcile derives status.flakeRef from the referenced GitRepository's artifact.
@@ -97,8 +98,46 @@ func (r *FloxCatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Status().Patch(ctx, &flake, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Propagate the resolved revision as the relock token to the FloxEnvs this catalog serves, so a
+	// catalog advance re-resolves their packages against the NEW commit (nix cache-hits the
+	// unchanged ones). Without this the FloxEnv lock stays pinned at its first-realize commit.
+	if err := r.propagateRelock(ctx, flake.Namespace, revision); err != nil {
+		return ctrl.Result{}, err
+	}
 	l.Info("resolved FloxCatalog", "flake", req.NamespacedName, "revision", revision, "flakeRef", flakeRef)
 	return ctrl.Result{}, nil
+}
+
+// propagateRelock stamps the catalog's resolved revision as the relock token (relockAnnotation) on
+// every FloxEnv it serves (the namespace's envs). The FloxEnv reconciler re-locks when the
+// annotation differs from its status.RelockToken, so a catalog advance re-resolves each env's
+// package against the new revision — changed packages rebuild, unchanged ones re-lock to the same
+// derivation (a cache-hit realize). Idempotent: only envs whose annotation != revision are patched,
+// and the token makes the re-lock fire once per revision. Cheap by design — nix detects what
+// actually changed, so re-locking all is correct without per-env commit analysis.
+func (r *FloxCatalogReconciler) propagateRelock(ctx context.Context, namespace, revision string) error {
+	if revision == "" {
+		return nil
+	}
+	var envs floxv1alpha1.FloxEnvList
+	if err := r.List(ctx, &envs, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range envs.Items {
+		env := &envs.Items[i]
+		if env.Annotations[relockAnnotation] == revision {
+			continue
+		}
+		patch := client.MergeFrom(env.DeepCopy())
+		if env.Annotations == nil {
+			env.Annotations = map[string]string{}
+		}
+		env.Annotations[relockAnnotation] = revision
+		if err := r.Patch(ctx, env, patch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *FloxCatalogReconciler) notReady(ctx context.Context, flake *floxv1alpha1.FloxCatalog, reason string, cause error) (ctrl.Result, error) {
