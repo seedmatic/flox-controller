@@ -128,6 +128,16 @@
             cp ${./config/crd}/*.yaml "$out"/
           '';
 
+          # The generated ClusterRole as a store artifact — the SINGLE SOURCE of the
+          # controller's RBAC, derived from the `+kubebuilder:rbac` markers (regenerated
+          # by `make rbac`). rke2lab's FloxControllerManifestsUnit INCLUDES this instead
+          # of hand-listing the rules; it still authors the ServiceAccount +
+          # ClusterRoleBinding + Deployment + webhook (its deployment-topology concern).
+          flox-controller-rbac = pkgs.runCommand "io.seedmatic.flox-controller-rbac" { } ''
+            mkdir -p "$out"
+            cp ${./config/rbac}/*.yaml "$out"/
+          '';
+
           default = flox-controller;
         };
 
