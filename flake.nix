@@ -87,8 +87,23 @@
           # Air-gap path (as for flox-carrier): the consumer (rke2lab) bakes this tar
           # into the node-base image via a tmpfiles symlink into
           # /var/lib/rancher/rke2/agent/images/, rke2 auto-imports it into local
-          # containerd at boot, and the DaemonSet references
-          # `io.seedmatic.flox-controller:<version>` with imagePullPolicy: IfNotPresent.
+          # containerd at boot, and the DaemonSet references it by its exact RepoTag
+          # with imagePullPolicy: IfNotPresent.
+          #
+          # ★ NO EXPLICIT TAG, deliberately: omitted, dockerTools tags the image with its
+          # OUTPUT HASH, so the tag MOVES WITH THE CONTENT.  It used to be `tag = version`,
+          # and `version` is a static VERSION file (`0.0.0-develop`) — so every rebuild
+          # produced different content under the SAME RepoTag.  Combined with the air-gap
+          # path (baked tar + auto-import) and `IfNotPresent`, a node that already held
+          # that tag NEVER adopted a new build: the new binary shipped inside the node
+          # image and the pod kept running the old one, with nothing reporting it.  A
+          # content-derived tag makes `IfNotPresent` correct instead of a trap — new
+          # content is a new tag the node cannot already have, and the old tag stays
+          # available for a rollback.
+          #
+          # Consumers must therefore READ the RepoTag (see flox-controller-image-ref)
+          # rather than restate it: a literal `name:version` on the consumer side cannot
+          # be right any more, which is the point.
           # nix is NOT in the image: the controller execs the NODE's nix (host /nix
           # mounted in) to realise closures onto the host store.
           # NOTE: dockerTools can't build on darwin — build on the aarch64-linux
@@ -97,7 +112,6 @@
             # OCI name doubles as the store-path basename → same io.seedmatic.<asset>
             # prefix for store discoverability + a self-evident image ref.
             name = "io.seedmatic.flox-controller";
-            tag = version;
             # The controller mounts the HOST /nix at /nix (to realise closures + GC-roots and
             # exec the node's flox/nix/ctr) — which SHADOWS the image's own /nix/store. So its
             # binary + cacert must be REAL files OUTSIDE /nix, else the entrypoint (and any
@@ -118,6 +132,20 @@
               Env = [ "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt" ];
             };
           };
+
+          # The image's RepoTag as a store artifact — the SINGLE SOURCE of the reference
+          # the consumer's DaemonSet must carry, published because the tag is now derived
+          # from the image's content and so cannot be written down anywhere by hand.
+          #
+          # Read off the image's own passthru, never recomputed: the ref and the image it
+          # names cannot disagree.  Shaped as a directory with one file, like the CRD and
+          # RBAC artifacts, so the consumer stages all three the same way.
+          flox-controller-image-ref =
+            pkgs.runCommand "io.seedmatic.flox-controller-image-ref" { } ''
+              mkdir -p "$out"
+              printf '%s' "${flox-controller-image.imageName}:${flox-controller-image.imageTag}" \
+                > "$out/flox-controller"
+            '';
 
           # The generated CRD(s) as a store artifact — the single source consumers
           # (rke2lab's manifest synthesis) emit into the cluster's `crds` layer,
