@@ -1,0 +1,135 @@
+package v1alpha1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// SourceReference points at a Flux source (a source.toolkit.fluxcd.io object) whose
+// reconciled artifact carries the flake tree. The controller reads the referenced
+// object's status.artifact to obtain an IN-CLUSTER tarball at the EXACT reconciled
+// revision — no external fetch, no token (Flux already fetched it, with its own auth).
+type SourceReference struct {
+	// Kind of the Flux source. Only GitRepository is supported today.
+	// +kubebuilder:validation:Enum=GitRepository
+	// +kubebuilder:default=GitRepository
+	// +optional
+	Kind string `json:"kind,omitempty"`
+
+	// Name of the Flux source object.
+	Name string `json:"name"`
+
+	// Namespace of the Flux source object. Defaults to the FloxCatalog's namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// FloxCatalogSpec binds a nix flake (the workload-package catalog) to a Flux source.
+// A FloxEnv references it via `install.<id>.flake = "floxcatalog:<name>#<output>"`; the
+// controller rewrites that to the concrete nix ref derived from the source's artifact.
+// This is the source/consumer split (à la Flux Kustomization -> GitRepository): the
+// controller stays generic — it knows nothing about the workload, only how to resolve
+// a flake output from a Flux source.
+type FloxCatalogSpec struct {
+	// SourceRef is the Flux source whose reconciled artifact carries the flake tree.
+	SourceRef SourceReference `json:"sourceRef"`
+
+	// Dir is the flake root within the source tree (the subdir holding flake.nix),
+	// e.g. "runtime/flox". Empty means the source tree root.
+	// +optional
+	Dir string `json:"dir,omitempty"`
+}
+
+// FloxCatalogStatus reports the concrete artifact the controller has pinned the flake to.
+type FloxCatalogStatus struct {
+	// Revision is the source's reconciled revision the flake is pinned to
+	// (e.g. "manifests/bioskop-mgmt@sha1:42a4846…").
+	// +optional
+	Revision string `json:"revision,omitempty"`
+
+	// ArtifactURL is the in-cluster tarball URL (Flux source-controller) the flake is
+	// resolved from at this revision.
+	// +optional
+	ArtifactURL string `json:"artifactURL,omitempty"`
+
+	// FlakeRef is the concrete nix flake reference the controller derives for this
+	// artifact (e.g. "tarball+http://…/<sha>.tar.gz?dir=runtime/flox"), reused by every
+	// FloxEnv that references this FloxCatalog.
+	// +optional
+	FlakeRef string `json:"flakeRef,omitempty"`
+
+	// EnvsSummary rolls up realisation of the FloxEnvs in this catalog's namespace (e.g. "6/8 ready"
+	// or "6/8 ready, 2 realizing") — a single-glance progress view so following the reconcile does
+	// not mean tailing the controller logs or listing every FloxEnv. The controller watches the
+	// FloxEnvs and recomputes this whenever one changes.
+	// +optional
+	EnvsSummary string `json:"envsSummary,omitempty"`
+
+	// Envs is the per-env realisation PLAN behind EnvsSummary — each FloxEnv in this namespace with
+	// its current phase (Pending / Realizing / Realized / WaitingForFlake / *Failed). So `kubectl
+	// describe floxcatalog` shows the whole plan at once, not the count alone.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Envs []FloxEnvPhase `json:"envs,omitempty"`
+
+	// Conditions is the standard condition set (Ready once an artifact is resolved).
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// FloxEnvPhase is one FloxEnv's realisation phase in a FloxCatalog's rollup plan (see
+// FloxCatalogStatus.Envs).
+type FloxEnvPhase struct {
+	// Name of the FloxEnv.
+	Name string `json:"name"`
+
+	// Phase is its current phase — the FloxEnv's Ready condition reason (Pending / Realizing /
+	// Realized / WaitingForFlake / *Failed), or empty before it has a condition.
+	// +optional
+	Phase string `json:"phase,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced,shortName=fcl
+// +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.sourceRef.name`
+// +kubebuilder:printcolumn:name="Dir",type=string,JSONPath=`.spec.dir`
+// +kubebuilder:printcolumn:name="Revision",type=string,JSONPath=`.status.revision`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Envs",type=string,JSONPath=`.status.envsSummary`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// FloxCatalog binds a nix flake (a workload-package catalog) to a Flux source.
+//
+// Reconciliation: the controller reads the referenced GitRepository's status.artifact —
+// the in-cluster tarball Flux's source-controller serves at the reconciled commit (Flux
+// already fetched + authenticated it, so there is no external fetch and no token here) —
+// and derives status.flakeRef = "tarball+<artifact-url>?dir=<spec.dir>", the concrete nix
+// reference pinned to that EXACT commit. A FloxEnv install entry "floxcatalog:<name>#<output>"
+// is rewritten to "<flakeRef>#<output>" before flox ever sees the manifest, so many FloxEnvs
+// share one pinned catalog while the controller stays generic (it only knows how to resolve
+// a flake from a Flux source — nothing about the workload). A new reconciled artifact (new
+// commit) re-derives status.flakeRef, keeping the flake in lock-step with the deployed
+// manifests (same commit, no drift).
+type FloxCatalog struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   FloxCatalogSpec   `json:"spec,omitempty"`
+	Status FloxCatalogStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// FloxCatalogList contains a list of FloxCatalog.
+type FloxCatalogList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []FloxCatalog `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&FloxCatalog{}, &FloxCatalogList{})
+}

@@ -1,0 +1,273 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"net"
+	neturl "net/url"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
+)
+
+// gitRepositoryGVK is the Flux source-controller GitRepository. Read as UNSTRUCTURED so
+// the controller carries no dependency on the Flux Go module — it only needs
+// status.artifact.{url,revision}.
+var gitRepositoryGVK = schema.GroupVersionKind{
+	Group:   "source.toolkit.fluxcd.io",
+	Version: "v1",
+	Kind:    "GitRepository",
+}
+
+// FloxCatalogReconciler resolves a FloxCatalog to a concrete nix flake reference derived from
+// the referenced Flux source's reconciled artifact — an in-cluster tarball at the EXACT
+// reconciled commit (no external fetch, no token: Flux already fetched it). This is
+// cluster-scoped, node-independent work; on multi-node it may run redundantly on each
+// node-agent (idempotent) until split into a leader-elected cluster manager.
+type FloxCatalogReconciler struct {
+	client.Client
+}
+
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxcatalogs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get;list;watch
+
+// Reconcile derives status.flakeRef from the referenced GitRepository's artifact.
+func (r *FloxCatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	l := log.FromContext(ctx)
+
+	var flake floxv1alpha1.FloxCatalog
+	if err := r.Get(ctx, req.NamespacedName, &flake); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	srcNS := flake.Spec.SourceRef.Namespace
+	if srcNS == "" {
+		srcNS = flake.Namespace
+	}
+
+	var src unstructured.Unstructured
+	src.SetGroupVersionKind(gitRepositoryGVK)
+	if err := r.Get(ctx, client.ObjectKey{Namespace: srcNS, Name: flake.Spec.SourceRef.Name}, &src); err != nil {
+		return r.notReady(ctx, &flake, "SourceNotFound", err)
+	}
+
+	url, _, _ := unstructured.NestedString(src.Object, "status", "artifact", "url")
+	if url == "" {
+		return r.notReady(ctx, &flake, "ArtifactNotReady",
+			fmt.Errorf("GitRepository %s/%s has no status.artifact.url yet", srcNS, flake.Spec.SourceRef.Name))
+	}
+	revision, _, _ := unstructured.NestedString(src.Object, "status", "artifact", "revision")
+
+	// The Flux artifact is an in-cluster tarball at the reconciled commit → a nix tarball
+	// flake ref; dir scopes the flake root within the source tree. nix fetches it ON THE NODE
+	// (via nsenter), whose netns routes ClusterIPs (Cilium) but has NO cluster DNS — so rewrite
+	// the artifact host to its ClusterIP, resolved here IN-POD where cluster DNS works.
+	reachableURL, err := nodeReachableURL(url)
+	if err != nil {
+		return r.notReady(ctx, &flake, "ArtifactURLUnresolvable", err)
+	}
+	flakeRef := "tarball+" + reachableURL
+	if flake.Spec.Dir != "" {
+		flakeRef += "?dir=" + flake.Spec.Dir
+	}
+
+	base := flake.DeepCopy()
+	flake.Status.Revision = revision
+	flake.Status.ArtifactURL = url
+	flake.Status.FlakeRef = flakeRef
+	flake.Status.EnvsSummary, flake.Status.Envs = r.envsRollup(ctx, flake.Namespace)
+	meta.SetStatusCondition(&flake.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Resolved",
+		Message:            fmt.Sprintf("resolved from GitRepository %s at %s", flake.Spec.SourceRef.Name, revision),
+		ObservedGeneration: flake.Generation,
+	})
+	if err := r.Status().Patch(ctx, &flake, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Propagate the resolved revision as the relock token to the FloxEnvs this catalog serves, so a
+	// catalog advance re-resolves their packages against the NEW commit (nix cache-hits the
+	// unchanged ones). Without this the FloxEnv lock stays pinned at its first-realize commit.
+	if err := r.propagateRelock(ctx, flake.Namespace, revision); err != nil {
+		return ctrl.Result{}, err
+	}
+	l.Info("resolved FloxCatalog", "flake", req.NamespacedName, "revision", revision, "flakeRef", flakeRef)
+	return ctrl.Result{}, nil
+}
+
+// propagateRelock stamps the catalog's resolved revision as the relock token (relockAnnotation) on
+// every FloxEnv it serves (the namespace's envs). The FloxEnv reconciler re-locks when the
+// annotation differs from its status.RelockToken, so a catalog advance re-resolves each env's
+// package against the new revision — changed packages rebuild, unchanged ones re-lock to the same
+// derivation (a cache-hit realize). Idempotent: only envs whose annotation != revision are patched,
+// and the token makes the re-lock fire once per revision. Cheap by design — nix detects what
+// actually changed, so re-locking all is correct without per-env commit analysis.
+func (r *FloxCatalogReconciler) propagateRelock(ctx context.Context, namespace, revision string) error {
+	if revision == "" {
+		return nil
+	}
+	var envs floxv1alpha1.FloxEnvList
+	if err := r.List(ctx, &envs, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range envs.Items {
+		env := &envs.Items[i]
+		if env.Annotations[relockAnnotation] == revision {
+			continue
+		}
+		patch := client.MergeFrom(env.DeepCopy())
+		if env.Annotations == nil {
+			env.Annotations = map[string]string{}
+		}
+		env.Annotations[relockAnnotation] = revision
+		if err := r.Patch(ctx, env, patch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *FloxCatalogReconciler) notReady(ctx context.Context, flake *floxv1alpha1.FloxCatalog, reason string, cause error) (ctrl.Result, error) {
+	base := flake.DeepCopy()
+	meta.SetStatusCondition(&flake.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            cause.Error(),
+		ObservedGeneration: flake.Generation,
+	})
+	_ = r.Status().Patch(ctx, flake, client.MergeFrom(base))
+	return ctrl.Result{}, cause
+}
+
+// nodeReachableURL rewrites an in-cluster artifact URL (Flux serves the tarball at
+// source-controller.<ns>.svc.cluster.local) to use the resolved ClusterIP in place of the DNS
+// name. The controller resolves it here IN-POD (cluster DNS works); the flake is then fetched by
+// nix ON THE NODE via nsenter, whose netns routes ClusterIPs (Cilium) but carries no cluster DNS.
+// source-controller serves artifacts by path, not vhost, so the IP Host header is fine. A URL
+// already using an IP is returned unchanged.
+func nodeReachableURL(raw string) (string, error) {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	host := u.Hostname()
+	if net.ParseIP(host) != nil {
+		return raw, nil
+	}
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return "", fmt.Errorf("resolve artifact host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("resolve artifact host %q: no addresses", host)
+	}
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort(ips[0], port)
+	} else {
+		u.Host = ips[0]
+	}
+	return u.String(), nil
+}
+
+// catalogsForSource enqueues every FloxCatalog whose sourceRef names the changed GitRepository,
+// so a new reconciled artifact (new commit) re-derives the flake ref.
+func (r *FloxCatalogReconciler) catalogsForSource(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list floxv1alpha1.FloxCatalogList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		f := &list.Items[i]
+		ns := f.Spec.SourceRef.Namespace
+		if ns == "" {
+			ns = f.Namespace
+		}
+		if f.Spec.SourceRef.Name == obj.GetName() && ns == obj.GetNamespace() {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: f.Namespace, Name: f.Name},
+			})
+		}
+	}
+	return reqs
+}
+
+// envsRollup lists the FloxEnvs in namespace and returns both the one-line summary ("<ready>/<total>
+// ready" + ", <k> realizing" while node builds are in flight) for the Envs column AND the per-env
+// plan (name -> phase) for status.envs. Empty on a list error — a transient blank beats a stale
+// count.
+func (r *FloxCatalogReconciler) envsRollup(
+	ctx context.Context, namespace string,
+) (string, []floxv1alpha1.FloxEnvPhase) {
+	var envs floxv1alpha1.FloxEnvList
+	if err := r.List(ctx, &envs, client.InNamespace(namespace)); err != nil {
+		return "", nil
+	}
+	ready, realizing := 0, 0
+	plan := make([]floxv1alpha1.FloxEnvPhase, 0, len(envs.Items))
+	for i := range envs.Items {
+		phase := ""
+		if c := meta.FindStatusCondition(envs.Items[i].Status.Conditions, "Ready"); c != nil {
+			phase = c.Reason
+			switch {
+			case c.Status == metav1.ConditionTrue:
+				ready++
+			case c.Reason == "Realizing":
+				realizing++
+			}
+		}
+		plan = append(plan, floxv1alpha1.FloxEnvPhase{Name: envs.Items[i].Name, Phase: phase})
+	}
+	summary := fmt.Sprintf("%d/%d ready", ready, len(envs.Items))
+	if realizing > 0 {
+		summary += fmt.Sprintf(", %d realizing", realizing)
+	}
+	return summary, plan
+}
+
+// catalogsForEnv enqueues every FloxCatalog in a changed FloxEnv's namespace, so the envsSummary
+// rollup refreshes as envs move through Realizing -> Realized.
+func (r *FloxCatalogReconciler) catalogsForEnv(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	var list floxv1alpha1.FloxCatalogList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: list.Items[i].Namespace, Name: list.Items[i].Name,
+			},
+		})
+	}
+	return reqs
+}
+
+// SetupWithManager watches FloxCatalog + the referenced GitRepository (unstructured), so a
+// new reconciled artifact re-resolves the flake ref; and the FloxEnvs, so the envsSummary rollup
+// tracks their realisation.
+func (r *FloxCatalogReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	src := &unstructured.Unstructured{}
+	src.SetGroupVersionKind(gitRepositoryGVK)
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&floxv1alpha1.FloxCatalog{}).
+		Watches(src, handler.EnqueueRequestsFromMapFunc(r.catalogsForSource)).
+		Watches(&floxv1alpha1.FloxEnv{}, handler.EnqueueRequestsFromMapFunc(r.catalogsForEnv)).
+		Complete(r)
+}

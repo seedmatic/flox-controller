@@ -1,0 +1,27 @@
+# The base flox carrier — the controller's CANONICAL carrier-contract provider,
+# embedded in the binary and self-provisioned on startup (see carrier.go). It belongs
+# to the controller, not the consumer: the baked controller ensures this on startup →
+# `flox containerize` produces the OCI base image flox-injected pods run on → carriers
+# exist. It is the root of the carrier composition tree (specialised carriers
+# `[include]` it by path). See docs/design.adoc § Carriers.
+#
+# The /etc/{passwd,group,nsswitch.conf} contract is provided by `flox containerize`
+# via nixpkgs fakeNss (verified spike, flox 1.14) — no extra packages; it resolves
+# because the NRI plugin overlays /nix from the host store (image /nix disposable).
+#
+# metadata.namespace is intentionally omitted — EnsureBase sets it (the controller's
+# own namespace). metadata.name + spec.folder are the stable identity.
+apiVersion: flox.seedmatic.io/v1alpha1
+kind: FloxEnv
+metadata:
+  name: carrier
+spec:
+  consumption: image
+  folder: flox-system
+  manifest:
+    install:
+      bashInteractive: { pkg-path: bashInteractive }
+      coreutils: { pkg-path: coreutils }
+      cacert: { pkg-path: cacert }
+  update:
+    mode: Manual
