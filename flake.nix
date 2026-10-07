@@ -59,7 +59,7 @@
     flake-commons.inputs.treefmt-nix.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, ... }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -168,6 +168,22 @@
           '';
 
           default = flox-controller;
+        };
+
+        # relock — THIS repo's locks, by the shared implementation in nix-flake-commons'
+        # `lib.mkRelockApp`: bump each input, drop any bump that moves no exported derivation, push.
+        apps.relock = {
+          type = "app";
+          program = "${
+            inputs.flake-commons.lib.mkRelockApp {
+              inherit pkgs;
+              name = "flox-controller";
+              slug = "seedmatic/flox-controller";
+              url = "https://github.com/seedmatic/flox-controller.git";
+              consumers = [ "github:seedmatic/rke2lab" ];
+            }
+          }/bin/relock";
+          meta.description = "Reconcile THIS repo's locks: bump each input, DROP any bump that moves no exported derivation, push — impl: nix-flake-commons lib.mkRelockApp";
         };
 
         # Dev toolchain lives in the flox env (.flox/env/manifest.toml): `flox activate`
