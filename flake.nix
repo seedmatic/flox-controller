@@ -37,18 +37,15 @@
     # consumes this flake it overrides flake-commons anyway; this keeps the STANDALONE lock lean for
     # external clones / CI. Keep this list in sync if the aggregator grows.
     flake-commons.inputs.bird.follows = "nixpkgs";
-    flake-commons.inputs.cachix.follows = "nixpkgs";
     flake-commons.inputs.chromium-bin.follows = "nixpkgs";
     flake-commons.inputs.darwin.follows = "nixpkgs";
     flake-commons.inputs.determinate.follows = "nixpkgs";
-    flake-commons.inputs.devenv.follows = "nixpkgs";
     flake-commons.inputs.disko.follows = "nixpkgs";
     flake-commons.inputs.extra-container.follows = "nixpkgs";
     flake-commons.inputs.flake-compat.follows = "nixpkgs";
     flake-commons.inputs.flox.follows = "nixpkgs";
     flake-commons.inputs.home-manager.follows = "nixpkgs";
     flake-commons.inputs.impermanence.follows = "nixpkgs";
-    flake-commons.inputs.incus-compose.follows = "nixpkgs";
     flake-commons.inputs.lix-module.follows = "nixpkgs";
     flake-commons.inputs.maven-mvnd.follows = "nixpkgs";
     flake-commons.inputs.nix.follows = "nixpkgs";
@@ -57,11 +54,9 @@
     flake-commons.inputs.nixos-hardware.follows = "nixpkgs";
     flake-commons.inputs.nixpkgs-unstable.follows = "nixpkgs";
     flake-commons.inputs.nvfetcher.follows = "nixpkgs";
-    flake-commons.inputs.ripvcs.follows = "nixpkgs";
     flake-commons.inputs.socket-vmnet.follows = "nixpkgs";
     flake-commons.inputs.sops-nix.follows = "nixpkgs";
     flake-commons.inputs.treefmt-nix.follows = "nixpkgs";
-    flake-commons.inputs.zen-browser.follows = "nixpkgs";
   };
 
   outputs = { self, nixpkgs, flake-utils, ... }:
