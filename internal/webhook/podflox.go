@@ -41,14 +41,8 @@ const (
 // (unscheduled, no container starts) until the controller's gate reconciler removes the gate —
 // which it does once every referenced FloxEnv is realised at the pod's current generation. The
 // pod itself needs no node access and no API access: the controller owns both the realisation
-// and the ungate. It also upserts the canonical flox settings/token onto the annotated containers.
+// and the ungate. It also upserts the canonical flox settings onto the annotated containers.
 type PodFloxMutator struct {
-	// TokenSecretName/TokenSecretKey locate the FloxHub token (a replicated Secret present
-	// in the pod's namespace). When set, FLOX_FLOXHUB_TOKEN is injected valueFrom that key
-	// into every flox-annotated container. Empty disables token injection (the knobs still go in).
-	TokenSecretName string
-	TokenSecretKey  string
-
 	// Client ensures the nix-build store PVC (named by the pod's annotation) exists
 	// (create-if-absent) when a pod opts into the nix-build capability, and READS the FloxEnv CR a
 	// container opts into to apply its spec.inject. nil disables both (volume still injected — the
@@ -75,7 +69,7 @@ func (i *PodFloxMutator) Default(ctx context.Context, obj runtime.Object) error 
 }
 
 // injectFloxWait handles the flox env concern: it adds the env-ready scheduling gate + upserts
-// the canonical flox settings/token onto every flox-annotated container. No-op for a pod that
+// the canonical flox settings onto every flox-annotated container. No-op for a pod that
 // opted into no flox env. Idempotent (a re-admission leaves it unchanged).
 //
 // Adding a scheduling gate is only legal at pod CREATE (the API server rejects adding one via
@@ -87,7 +81,7 @@ func (i *PodFloxMutator) injectFloxWait(ctx context.Context, pod *corev1.Pod) {
 		return // pod opted into no flox env
 	}
 
-	// Inject the canonical flox settings (+ the FloxHub token, + each env's declared spec.inject)
+	// Inject the canonical flox settings (+ each env's declared spec.inject)
 	// into every flox-annotated container — the single vector, subsuming the NRI plugin's AddEnv and
 	// the flox-runtime ConfigMap envFrom. Idempotent (upsert): a var already set on the container wins.
 	i.injectFloxEnv(ctx, pod)
@@ -201,12 +195,11 @@ func (i *PodFloxMutator) ensureNixStorePVC(ctx context.Context, namespace, name 
 	return nil
 }
 
-// injectFloxEnv upserts the canonical flox settings (floxenv) — and, when a token secret is
-// configured, FLOX_FLOXHUB_TOKEN valueFrom that Secret — onto every container that opted into a
+// injectFloxEnv upserts the canonical flox settings (floxenv) onto every container that opted into a
 // flox env via a per-container flox.seedmatic.io/environment.<container> annotation. A flox.seedmatic.io/environment.<c>
 // annotation may name an INIT container (e.g. headscale's config-init / wait-for-headscale, which run
 // `flox activate` to render config or wait for a barrier): the NRI plugin puts flox on their PATH, so
-// they need the same knobs + token. Our own flox-wait busybox carries no such annotation and is
+// they need the same knobs. Our own flox-wait busybox carries no such annotation and is
 // therefore skipped.
 func (i *PodFloxMutator) injectFloxEnv(ctx context.Context, pod *corev1.Pod) {
 	// Map each opted-in container to the env it named (annotation VALUE = "<folder>/<name>"; the
@@ -255,7 +248,7 @@ func (i *PodFloxMutator) resolveInjects(
 	return out
 }
 
-// injectFloxEnvInto upserts the flox knobs (+ optional FloxHub token, + the container's env's
+// injectFloxEnvInto upserts the flox knobs (+ the container's env's
 // declared spec.inject) onto c iff c opted into a flox env (its name is a key of envOf).
 func (i *PodFloxMutator) injectFloxEnvInto(
 	c *corev1.Container, envOf map[string]string, injects map[string][]floxv1alpha1.InjectedEnv,
@@ -266,22 +259,6 @@ func (i *PodFloxMutator) injectFloxEnvInto(
 	}
 	for _, s := range floxenv.Settings() {
 		upsertEnv(c, corev1.EnvVar{Name: s.Name, Value: s.Value})
-	}
-	if i.TokenSecretName != "" && i.TokenSecretKey != "" {
-		// optional: the webhook injects cluster-wide, but the (replicated) token secret only
-		// exists in namespaces that created its replicate-from stub — a namespace without it
-		// must NOT wedge on a missing secret; flox there runs unauthenticated (warnings only).
-		optional := true
-		upsertEnv(c, corev1.EnvVar{
-			Name: "FLOX_FLOXHUB_TOKEN",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: i.TokenSecretName},
-					Key:                  i.TokenSecretKey,
-					Optional:             &optional,
-				},
-			},
-		})
 	}
 	// The env's own contributions (e.g. git-sops → SOPS_AGE_KEY). upsert: an explicit value on the
 	// pod spec still wins.

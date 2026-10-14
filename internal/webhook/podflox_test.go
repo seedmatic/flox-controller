@@ -57,11 +57,8 @@ func TestInject_AlreadyScheduledNotGated(t *testing.T) {
 	}
 }
 
-func TestInject_InjectsFloxEnvAndToken(t *testing.T) {
-	inj := &PodFloxMutator{
-		TokenSecretName: "floxhub-token",
-		TokenSecretKey:  "token",
-	}
+func TestInject_InjectsFloxEnv(t *testing.T) {
+	inj := &PodFloxMutator{}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"flox.seedmatic.io/environment.app": "networking/kdns"}},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{
@@ -76,11 +73,6 @@ func TestInject_InjectsFloxEnvAndToken(t *testing.T) {
 	if envValue(app.Env, "FLOX_NONINTERACTIVE") != "1" ||
 		envValue(app.Env, "_FLOX_TESTING_DISABLE_BG_SIDE_EFFECTS") != "true" {
 		t.Errorf("flox knobs not injected on annotated container: %+v", app.Env)
-	}
-	tok := findEnv(app.Env, "FLOX_FLOXHUB_TOKEN")
-	if tok == nil || tok.ValueFrom == nil || tok.ValueFrom.SecretKeyRef == nil ||
-		tok.ValueFrom.SecretKeyRef.Name != "floxhub-token" || tok.ValueFrom.SecretKeyRef.Key != "token" {
-		t.Errorf("token env not injected valueFrom the secret: %+v", tok)
 	}
 	if len(pod.Spec.Containers[1].Env) != 0 {
 		t.Errorf("non-annotated sidecar mutated: %+v", pod.Spec.Containers[1].Env)

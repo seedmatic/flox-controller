@@ -201,8 +201,7 @@ func (p *ExecProvisioner) addEnvSubtree(ctx context.Context, ref EnvRef, floxEnv
 	return strings.TrimSpace(string(out)), nil
 }
 
-// floxCommandEnv is the environment for flox subprocesses: the process env (which carries
-// FLOX_FLOXHUB_TOKEN when the DaemonSet wires it from the replicated Secret) plus the canonical
+// floxCommandEnv is the environment for flox subprocesses: the process env plus the canonical
 // flox behavioural knobs — the single source in floxenv, shared with the pod-injecting webhook.
 //
 // When GITHUB_ACCESS_TOKEN_FILE points at a readable file (the DaemonSet mounts the replicated

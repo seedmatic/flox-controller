@@ -19,8 +19,14 @@
 
   # Follow the seedmatic aggregator so the whole closure resolves to one nixpkgs
   # (same discipline as flox-nri-plugin / rke2lab runtime-flox).
+  # Every SEEDMATIC-owned input below is an INDIRECT id (`url = "flake-commons"`), resolved through
+  # nix's registry: the branch-less default target lives in the committed flake-registry.json, and
+  # the operator re-aims it by dropping a flake-registry.local.json beside it (see the [include] in
+  # .flox/env/manifest.toml). A branch named here could only be re-aimed by pushing an edit to this
+  # file; naming none means naming nothing that can be deleted. The lock still records a revision,
+  # so evaluating from it needs no registry at all.
   inputs = {
-    flake-commons.url = "github:seedmatic/nix-flake-commons/develop";
+    flake-commons.url = "flake-commons";
     nixpkgs.follows = "flake-commons/nixpkgs";
     flake-utils.follows = "flake-commons/flake-utils";
 
@@ -31,18 +37,15 @@
     # consumes this flake it overrides flake-commons anyway; this keeps the STANDALONE lock lean for
     # external clones / CI. Keep this list in sync if the aggregator grows.
     flake-commons.inputs.bird.follows = "nixpkgs";
-    flake-commons.inputs.cachix.follows = "nixpkgs";
     flake-commons.inputs.chromium-bin.follows = "nixpkgs";
     flake-commons.inputs.darwin.follows = "nixpkgs";
     flake-commons.inputs.determinate.follows = "nixpkgs";
-    flake-commons.inputs.devenv.follows = "nixpkgs";
     flake-commons.inputs.disko.follows = "nixpkgs";
     flake-commons.inputs.extra-container.follows = "nixpkgs";
     flake-commons.inputs.flake-compat.follows = "nixpkgs";
     flake-commons.inputs.flox.follows = "nixpkgs";
     flake-commons.inputs.home-manager.follows = "nixpkgs";
     flake-commons.inputs.impermanence.follows = "nixpkgs";
-    flake-commons.inputs.incus-compose.follows = "nixpkgs";
     flake-commons.inputs.lix-module.follows = "nixpkgs";
     flake-commons.inputs.maven-mvnd.follows = "nixpkgs";
     flake-commons.inputs.nix.follows = "nixpkgs";
@@ -51,14 +54,11 @@
     flake-commons.inputs.nixos-hardware.follows = "nixpkgs";
     flake-commons.inputs.nixpkgs-unstable.follows = "nixpkgs";
     flake-commons.inputs.nvfetcher.follows = "nixpkgs";
-    flake-commons.inputs.ripvcs.follows = "nixpkgs";
-    flake-commons.inputs.socket-vmnet.follows = "nixpkgs";
     flake-commons.inputs.sops-nix.follows = "nixpkgs";
     flake-commons.inputs.treefmt-nix.follows = "nixpkgs";
-    flake-commons.inputs.zen-browser.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils, ... }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -167,6 +167,20 @@
           '';
 
           default = flox-controller;
+        };
+
+        # relock — nix-flake-commons' `lib.mkRelockApp`, the one implementation every seedmatic
+        # flake shares. This head supplies its name; the heads, the order and what each head pins
+        # are read from nix-flake-commons:fabric/heads.
+        apps.relock = {
+          type = "app";
+          program = "${
+            inputs.flake-commons.lib.mkRelockApp {
+              inherit pkgs;
+              name = "flox-controller";
+            }
+          }/bin/relock";
+          meta.description = "Reconcile THIS head's locks: bump each input, DROP any bump that moves nothing it exports, push. --plan shows a pass, --downstream plays it over every head of fabric/heads";
         };
 
         # Dev toolchain lives in the flox env (.flox/env/manifest.toml): `flox activate`

@@ -3,10 +3,6 @@
 //   - the controller's own flox subprocesses (provisioner.floxCommandEnv);
 //   - the mutating webhook that injects them into flox-consuming pods — subsuming the NRI
 //     plugin's ad-hoc AddEnv and the flox-runtime ConfigMap envFrom (a later increment).
-//
-// The FloxHub auth token is deliberately NOT here: it is per-deployment secret material carried
-// through the process/pod environment (FLOX_FLOXHUB_TOKEN, sourced from a replicated Secret), not
-// a static behavioural knob.
 package floxenv
 
 import (

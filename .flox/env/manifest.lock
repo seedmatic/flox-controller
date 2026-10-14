@@ -25,6 +25,9 @@
     "vars": {
       "CGO_ENABLED": "0"
     },
+    "hook": {
+      "on-activate": "  _flox_nix_registry=\"\"\n  if [ -f \"${FLOX_ENV_PROJECT}/flake-registry.local.json\" ]; then\n    _flox_nix_registry=\"${FLOX_ENV_PROJECT}/flake-registry.local.json\"\n  elif [ -f \"${FLOX_ENV_PROJECT}/flake-registry.json\" ]; then\n    _flox_nix_registry=\"${FLOX_ENV_PROJECT}/flake-registry.json\"\n  fi\n  if [ -n \"$_flox_nix_registry\" ]; then\n    # nix.conf settings are newline-separated and NIX_CONFIG may already carry some — notably\n    # the access-tokens for the private inputs, which have to survive this.\n    _flox_nix_nl='\n'\n    export NIX_CONFIG=\"${NIX_CONFIG:+${NIX_CONFIG}${_flox_nix_nl}}flake-registry = $_flox_nix_registry\"\n    unset _flox_nix_nl\n  fi\n  unset _flox_nix_registry\n"
+    },
     "options": {
       "systems": [
         "aarch64-darwin",
@@ -316,6 +319,7 @@
       "outputs_to_install": [
         "out",
         "out",
+        "out",
         "out"
       ],
       "outputs": {
@@ -346,6 +350,7 @@
       "unfree": false,
       "version": "1.26.4",
       "outputs_to_install": [
+        "out",
         "out"
       ],
       "outputs": {
@@ -406,6 +411,7 @@
       "unfree": false,
       "version": "1.26.4",
       "outputs_to_install": [
+        "out",
         "out"
       ],
       "outputs": {
@@ -436,6 +442,7 @@
       "unfree": false,
       "version": "0.22.0",
       "outputs_to_install": [
+        "out",
         "out"
       ],
       "outputs": {
@@ -466,6 +473,7 @@
       "unfree": false,
       "version": "0.22.0",
       "outputs_to_install": [
+        "out",
         "out"
       ],
       "outputs": {
@@ -526,6 +534,7 @@
       "unfree": false,
       "version": "0.22.0",
       "outputs_to_install": [
+        "out",
         "out"
       ],
       "outputs": {
@@ -793,5 +802,64 @@
       "group": "toplevel",
       "priority": 5
     }
-  ]
+  ],
+  "compose": {
+    "composer": {
+      "schema-version": "1.14.0",
+      "install": {
+        "delve": {
+          "pkg-path": "delve"
+        },
+        "gnumake": {
+          "pkg-path": "gnumake"
+        },
+        "go": {
+          "pkg-path": "go"
+        },
+        "gopls": {
+          "pkg-path": "gopls"
+        },
+        "kubectl": {
+          "pkg-path": "kubectl"
+        },
+        "kubernetes-controller-tools": {
+          "pkg-path": "kubernetes-controller-tools"
+        }
+      },
+      "vars": {
+        "CGO_ENABLED": "0"
+      },
+      "options": {
+        "systems": [
+          "aarch64-darwin",
+          "aarch64-linux",
+          "x86_64-darwin",
+          "x86_64-linux"
+        ]
+      },
+      "include": {
+        "environments": [
+          {
+            "dir": "./.flox-envs.d/flake-registry"
+          }
+        ]
+      }
+    },
+    "include": [
+      {
+        "manifest": {
+          "schema-version": "1.11.0",
+          "hook": {
+            "on-activate": "  _flox_nix_registry=\"\"\n  if [ -f \"${FLOX_ENV_PROJECT}/flake-registry.local.json\" ]; then\n    _flox_nix_registry=\"${FLOX_ENV_PROJECT}/flake-registry.local.json\"\n  elif [ -f \"${FLOX_ENV_PROJECT}/flake-registry.json\" ]; then\n    _flox_nix_registry=\"${FLOX_ENV_PROJECT}/flake-registry.json\"\n  fi\n  if [ -n \"$_flox_nix_registry\" ]; then\n    # nix.conf settings are newline-separated and NIX_CONFIG may already carry some — notably\n    # the access-tokens for the private inputs, which have to survive this.\n    _flox_nix_nl='\n'\n    export NIX_CONFIG=\"${NIX_CONFIG:+${NIX_CONFIG}${_flox_nix_nl}}flake-registry = $_flox_nix_registry\"\n    unset _flox_nix_nl\n  fi\n  unset _flox_nix_registry\n"
+          },
+          "options": {}
+        },
+        "name": "flake-registry",
+        "descriptor": {
+          "dir": "./.flox-envs.d/flake-registry"
+        }
+      }
+    ],
+    "warnings": []
+  }
 }
