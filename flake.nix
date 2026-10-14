@@ -36,7 +36,6 @@
     # subtrees collapse out of the lock (the flox-nri-plugin idiom → a ~5-node lock). When rke2lab
     # consumes this flake it overrides flake-commons anyway; this keeps the STANDALONE lock lean for
     # external clones / CI. Keep this list in sync if the aggregator grows.
-    flake-commons.inputs.bird.follows = "nixpkgs";
     flake-commons.inputs.chromium-bin.follows = "nixpkgs";
     flake-commons.inputs.darwin.follows = "nixpkgs";
     flake-commons.inputs.determinate.follows = "nixpkgs";
