@@ -1,23 +1,23 @@
 {
   "schema": "seedmatic.relock/v1",
   "head": "flox-controller",
-  "rev": "f811e29986f5e75602015cc6bac66edcdc715530",
+  "rev": "a8780e2d560ec1b9c0759573ed887729499386bb",
   "status": {
-    "wave": "flake-commons@2026-10-14T11:57:01Z",
-    "tool": "c980f36a158ba9ee5551726319f5c0e6d25c7767400145958bb524a78326e9ae",
+    "wave": "flake-commons@2026-10-14T12:34:17Z",
+    "tool": "86be1ecfd7d9b28e3810862652e40b9f25ae6bfd19a4787b0b1d99d3f965404c",
     "bumped": {
       "flake-commons": [
-        "337f08b156f4a0e3281819cc31ed563989ccdcd4",
-        "f50b98300f8802befbb6d4e644884c21371ec547"
+        "f50b98300f8802befbb6d4e644884c21371ec547",
+        "d2aefe87a7451b65a6910ef620f02b3ab43519df"
       ]
     },
     "pruned": {},
     "dropped": [],
     "after": [],
     "unmeasured": [
-      "apps of x86_64-darwin: one of them does not evaluate before any bump, so none of x86_64-darwin is measured — error: Cannot build '/nix/store/48djwrwjqlnjg2n66hz09pafv9p3y11m-relock.sh.drv'.",
-      "apps of x86_64-linux: one of them does not evaluate before any bump, so none of x86_64-linux is measured — error: Cannot build '/nix/store/haa2lvcs45zwnfs8j6ayvrm21y1hnxp1-relock.sh.drv'."
+      "apps of x86_64-darwin: one of them does not evaluate before any bump, so none of x86_64-darwin is measured — error: Cannot build '/nix/store/pcq8lsr2g3vsfr4lkd75hbpk30hhykvr-relock.sh.drv'.",
+      "apps of x86_64-linux: one of them does not evaluate before any bump, so none of x86_64-linux is measured — error: Cannot build '/nix/store/panbhz34748knngqm75ps2n8zf86dah8-relock.sh.drv'."
     ],
-    "seconds": 26
+    "seconds": 28
   }
 }
