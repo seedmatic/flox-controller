@@ -1,22 +1,6 @@
 {
   description = "flox-controller — FloxEnv CRD + node-agent controller for runtime flox-env delivery";
 
-  # Public flake: consumers outside the fleet lack ndh's system-wide cache-trust, so declare the
-  # non-default binary caches this flake's closure resolves from. ADDITIVE (extra-*) + public-read,
-  # honoured via --accept-flake-config — an external clone or CI substitutes instead of rebuilding.
-  #   - nxmatic.cachix.org : where our build of the controller is published (substituted, not rebuilt).
-  #   - cache.flox.dev     : this flake builds against flake-commons' nixpkgs and lives in the flox
-  #                          ecosystem (its closure pulls flox/nixpkgs fork nodes), whose store paths
-  #                          are on flox's cache rather than cache.nixos.org.
-  nixConfig.extra-substituters = [
-    "https://cache.flox.dev"
-    "https://nxmatic.cachix.org"
-  ];
-  nixConfig.extra-trusted-public-keys = [
-    "flox-cache-public-1:7F4OyH7ZCnFhcze3fJdfyXYLQw/aV7GEed86nQ7IsOs="
-    "nxmatic.cachix.org-1:huMghYiwDpPa1PMXHXK4G1Dp4QOZjgsNqxcjf/AjuJ0="
-  ];
-
   # Follow the seedmatic aggregator so the whole closure resolves to one nixpkgs
   # (same discipline as flox-nri-plugin / rke2lab runtime-flox).
   # Every SEEDMATIC-owned input below is an INDIRECT id (`url = "flake-commons"`), resolved through
@@ -64,6 +48,8 @@
         version = pkgs.lib.fileContents ./VERSION;
       in
       {
+        # No nixConfig in this flake: no machine of ours takes one (nix-flake-commons' shared check).
+        checks.no-nix-config = inputs.flake-commons.lib.noNixConfig pkgs ./flake.nix;
         packages = rec {
           # The controller binary. Static (CGO off) so it runs in a minimal image.
           flox-controller = pkgs.buildGoModule {
