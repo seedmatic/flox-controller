@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -13,9 +14,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
 	"github.com/seedmatic/flox-controller/internal/provisioner"
@@ -46,6 +49,34 @@ type FloxEnvReconciler struct {
 	client.Client
 	NodeName    string
 	Provisioner provisioner.Provisioner
+	// RealizeTimeout bounds one realise (a node-side nix build): a hung build fails into the
+	// error's backoff instead of holding its env at Realizing. Zero means defaultRealizeTimeout.
+	RealizeTimeout time.Duration
+	// RealizeSlots caps the realises running at once on this node. Zero means defaultRealizeSlots.
+	RealizeSlots int
+
+	slotsOnce sync.Once
+	slots     chan struct{}
+}
+
+// A cold realise of the largest env measured (the carrier, a from-scratch closure) is a matter of
+// minutes; half an hour leaves it ample room on a loaded node while a hung build is cut the same
+// day, not nine hours later.
+const defaultRealizeTimeout = 30 * time.Minute
+
+// Two builds at once: nix already parallelises inside a build, and each realise holds a large
+// closure in memory on the node.
+const defaultRealizeSlots = 2
+
+func (r *FloxEnvReconciler) slot() chan struct{} {
+	r.slotsOnce.Do(func() {
+		n := r.RealizeSlots
+		if n <= 0 {
+			n = defaultRealizeSlots
+		}
+		r.slots = make(chan struct{}, n)
+	})
+	return r.slots
 }
 
 // +kubebuilder:rbac:groups=flox.seedmatic.io,resources=floxenvs,verbs=get;list;watch;create;update;patch;delete
@@ -118,12 +149,28 @@ func (r *FloxEnvReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		lock = ""
 	}
 
+	// Wait for a realise slot: each realise is a node-side nix build, and the 100 reconciles the
+	// worker allows would otherwise run as 100 builds on one node.
+	slots := r.slot()
+	select {
+	case slots <- struct{}{}:
+	case <-ctx.Done():
+		return ctrl.Result{}, ctx.Err()
+	}
+	defer func() { <-slots }()
+
 	// Surface that a (possibly long) node-side nix build is in flight: the reconcile BLOCKS in
 	// Realize, so without this the env would keep showing its prior phase until the build returns.
 	// Best-effort — a failed patch only loses the transient Realizing hint.
 	r.markRealizing(ctx, &env)
 
-	res, err := r.Provisioner.Realize(ctx, provisioner.RealizeRequest{
+	timeout := r.RealizeTimeout
+	if timeout <= 0 {
+		timeout = defaultRealizeTimeout
+	}
+	realizeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	res, err := r.Provisioner.Realize(realizeCtx, provisioner.RealizeRequest{
 		Ref:          provisioner.EnvRef{Folder: folder, Name: env.Name},
 		ManifestTOML: manifestTOML,
 		Lock:         lock,
@@ -404,10 +451,17 @@ func upsertRealization(st *floxv1alpha1.FloxEnvStatus, nr floxv1alpha1.NodeReali
 	st.Realized = append(st.Realized, nr)
 }
 
+// realisationChange passes what asks for a realise: a spec change (a new generation) or an
+// annotation change (the relock annotation forces one without touching the spec). The reconcile's
+// own status writes do not re-enqueue it; its requeues carry the waits it needs.
+func realisationChange() predicate.Predicate {
+	return predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{})
+}
+
 // SetupWithManager wires the reconciler to watch FloxEnv resources.
 func (r *FloxEnvReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&floxv1alpha1.FloxEnv{}).
+		For(&floxv1alpha1.FloxEnv{}, builder.WithPredicates(realisationChange())).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Complete(r)
 }

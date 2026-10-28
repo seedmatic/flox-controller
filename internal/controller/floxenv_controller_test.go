@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,7 +35,20 @@ func scheme(t *testing.T) *runtime.Scheme {
 	if err := floxv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add scheme: %v", err)
 	}
+	// A realise whose lock changed rolls the env's consumers (ba3f144), which lists the workloads.
+	if err := appsv1.AddToScheme(s); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
 	return s
+}
+
+// pastFirstTouch runs the reconcile's first pass, which only publishes Pending and requeues (61e1dcb),
+// so the call a test makes next is the one that realises, as the requeue makes it in the controller.
+func pastFirstTouch(t *testing.T, r *FloxEnvReconciler, name types.NamespacedName) {
+	t.Helper()
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: name}); err != nil {
+		t.Fatalf("first touch: %v", err)
+	}
 }
 
 func TestReconcile_RealizesAndPatchesStatus(t *testing.T) {
@@ -54,6 +68,7 @@ func TestReconcile_RealizesAndPatchesStatus(t *testing.T) {
 	fp := &fakeProvisioner{result: provisioner.RealizeResult{StorePath: "/nix/store/abc-env"}}
 	r := &FloxEnvReconciler{Client: c, NodeName: "node-a", Provisioner: fp}
 
+	pastFirstTouch(t, r, types.NamespacedName{Name: "kdns", Namespace: "networking"})
 	if _, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Name: "kdns", Namespace: "networking"}}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -98,6 +113,7 @@ func TestReconcile_RealizeFailureSetsNotReady(t *testing.T) {
 	fp := &fakeProvisioner{err: context.DeadlineExceeded}
 	r := &FloxEnvReconciler{Client: c, NodeName: "node-a", Provisioner: fp}
 
+	pastFirstTouch(t, r, types.NamespacedName{Name: "kdns", Namespace: "networking"})
 	if _, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Name: "kdns", Namespace: "networking"}}); err == nil {
 		t.Fatal("expected error to requeue")
@@ -133,6 +149,7 @@ func TestReconcile_ResolvesFloxCatalogRefAndCapturesLock(t *testing.T) {
 
 	fp := &fakeProvisioner{result: provisioner.RealizeResult{StorePath: "/nix/store/x", Lock: "locked!"}}
 	r := &FloxEnvReconciler{Client: c, NodeName: "node-a", Provisioner: fp}
+	pastFirstTouch(t, r, types.NamespacedName{Name: "kdns", Namespace: "networking"})
 	if _, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Name: "kdns", Namespace: "networking"}}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -172,6 +189,7 @@ func TestReconcile_WaitsForUnresolvedFlake(t *testing.T) {
 
 	fp := &fakeProvisioner{}
 	r := &FloxEnvReconciler{Client: c, NodeName: "node-a", Provisioner: fp}
+	pastFirstTouch(t, r, types.NamespacedName{Name: "kdns", Namespace: "networking"})
 	res, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Name: "kdns", Namespace: "networking"}})
 	if err != nil {
