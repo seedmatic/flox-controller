@@ -12,9 +12,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	floxv1alpha1 "github.com/seedmatic/flox-controller/api/v1alpha1"
@@ -104,7 +107,12 @@ func (r *FloxCatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.propagateRelock(ctx, flake.Namespace, revision); err != nil {
 		return ctrl.Result{}, err
 	}
-	l.Info("resolved FloxCatalog", "flake", req.NamespacedName, "revision", revision, "flakeRef", flakeRef)
+	// The rollup refreshes on every env transition; only a new revision or ref is news.
+	logger := l.V(1)
+	if base.Status.Revision != revision || base.Status.FlakeRef != flakeRef {
+		logger = l
+	}
+	logger.Info("resolved FloxCatalog", "flake", req.NamespacedName, "revision", revision, "flakeRef", flakeRef)
 	return ctrl.Result{}, nil
 }
 
@@ -266,8 +274,39 @@ func (r *FloxCatalogReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	src := &unstructured.Unstructured{}
 	src.SetGroupVersionKind(gitRepositoryGVK)
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&floxv1alpha1.FloxCatalog{}).
+		For(&floxv1alpha1.FloxCatalog{}, builder.WithPredicates(catalogChange())).
 		Watches(src, handler.EnqueueRequestsFromMapFunc(r.catalogsForSource)).
-		Watches(&floxv1alpha1.FloxEnv{}, handler.EnqueueRequestsFromMapFunc(r.catalogsForEnv)).
+		Watches(&floxv1alpha1.FloxEnv{}, handler.EnqueueRequestsFromMapFunc(r.catalogsForEnv),
+			builder.WithPredicates(envReadinessChange())).
 		Complete(r)
+}
+
+// catalogChange ignores the catalog's own status writes: the reconcile patches status on every pass,
+// and without this each patch re-enqueued the catalog.
+func catalogChange() predicate.Predicate {
+	return predicate.GenerationChangedPredicate{}
+}
+
+// envReadinessChange passes a FloxEnv update only when its Ready condition's status or reason moves,
+// the only inputs of the envs rollup. The relock annotation this reconciler stamps on every env, and
+// the envs' other status writes, would otherwise re-enqueue the catalog once each.
+func envReadinessChange() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			before, okBefore := e.ObjectOld.(*floxv1alpha1.FloxEnv)
+			after, okAfter := e.ObjectNew.(*floxv1alpha1.FloxEnv)
+			if !okBefore || !okAfter {
+				return true
+			}
+			return readiness(before) != readiness(after)
+		},
+	}
+}
+
+func readiness(env *floxv1alpha1.FloxEnv) string {
+	c := meta.FindStatusCondition(env.Status.Conditions, "Ready")
+	if c == nil {
+		return ""
+	}
+	return string(c.Status) + "/" + c.Reason
 }

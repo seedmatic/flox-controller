@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -12,8 +13,15 @@ func TestNodeReachableURL(t *testing.T) {
 		t.Errorf("ip passthrough: got %q err %v, want unchanged", got, err)
 	}
 
+	if _, err := nodeReachableURL("://not a url"); err == nil {
+		t.Error("expected error on an unparseable URL")
+	}
+
 	// A hostname is resolved to an IP; scheme/port/path are preserved and the DNS name is gone.
-	// localhost is reliably resolvable in any environment.
+	// The nix build sandbox has no resolver, not even for localhost, so this half needs one.
+	if _, err := net.LookupHost("localhost"); err != nil {
+		t.Skipf("no resolver here (%v): hostname rewrite not exercised", err)
+	}
 	got, err := nodeReachableURL("http://localhost:8080/gitrepository/x/y.tar.gz")
 	if err != nil {
 		t.Fatalf("resolve localhost: %v", err)
@@ -23,9 +31,5 @@ func TestNodeReachableURL(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "http://") || !strings.HasSuffix(got, ":8080/gitrepository/x/y.tar.gz") {
 		t.Errorf("scheme/port/path not preserved: %q", got)
-	}
-
-	if _, err := nodeReachableURL("://not a url"); err == nil {
-		t.Error("expected error on an unparseable URL")
 	}
 }

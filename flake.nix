@@ -50,6 +50,17 @@
       {
         # No nixConfig in this flake: no machine of ours takes one (nix-flake-commons' shared check).
         checks.no-nix-config = inputs.flake-commons.lib.noNixConfig pkgs ./flake.nix;
+        # The controllers' own tests: the package build only tests its subPackage (cmd/), so
+        # without this nothing under internal/ ran in a check.
+        checks.controller-tests = pkgs.buildGoModule {
+          pname = "io.seedmatic.flox-controller-tests";
+          inherit version;
+          src = ./.;
+          inherit (self.packages.${system}.flox-controller) vendorHash;
+          subPackages = [ "internal/..." ];
+          env.CGO_ENABLED = 0;
+          installPhase = "mkdir -p $out";
+        };
         packages = rec {
           # The controller binary. Static (CGO off) so it runs in a minimal image.
           flox-controller = pkgs.buildGoModule {
